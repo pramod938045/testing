@@ -5,13 +5,13 @@ done?", "summarise the current sprint", "log 2h on ABC-42" — and it works out 
 API calls to make, runs them, and answers from the real data.
 
 Claude does the language understanding via tool-calling; the Jira REST API does the work.
-There is a browser chat UI, a JSON API, and a terminal client.
+Three front ends — a browser chat UI, a Slack bot, and a terminal client — share one agent.
 
 ```
-browser / CLI  ->  FastAPI (app/main.py)
-                     -> JiraChatAgent (app/agent.py)   tool-use loop with Claude
-                        -> tools (app/tools.py)        15 Jira operations
-                           -> JiraClient (app/jira_client.py)  REST v3 + Agile v1.0
+browser (app/main.py)  ─┐
+Slack   (slack_bot.py) ─┼─> JiraChatAgent (app/agent.py)   tool-use loop with Claude
+CLI     (cli.py)       ─┘      -> tools (app/tools.py)     15 Jira operations
+                                  -> JiraClient (app/jira_client.py)  REST v3 + Agile v1.0
 ```
 
 ## What it can do
@@ -58,6 +58,12 @@ Web UI at http://localhost:8000:
 uvicorn app.main:app --reload
 ```
 
+Slack (see setup below):
+
+```bash
+python slack_bot.py
+```
+
 Terminal:
 
 ```bash
@@ -87,6 +93,36 @@ Pass the returned `session_id` back on the next call to continue the conversatio
 - Move ABC-42 to In Progress and comment that I've started.
 - Log 3h on ABC-42 for the migration work.
 
+## Slack setup
+
+The bot runs over **Socket Mode**, so it needs no public URL, no ngrok and no inbound
+firewall rules — it dials out to Slack.
+
+At https://api.slack.com/apps → **Create New App** → *From scratch*:
+
+1. **Socket Mode** → enable it. That generates an **App-Level Token** with
+   `connections:write` — this is `SLACK_APP_TOKEN` (`xapp-…`).
+2. **OAuth & Permissions** → add these bot scopes:
+   `app_mentions:read`, `chat:write`, `im:read`, `im:write`, `im:history`.
+3. **Event Subscriptions** → enable, and subscribe to bot events:
+   `app_mention` and `message.im`.
+4. **Install to Workspace** → copy the **Bot User OAuth Token** into `SLACK_BOT_TOKEN`
+   (`xoxb-…`).
+5. `python slack_bot.py`, then invite the bot to a channel: `/invite @yourbot`.
+
+How it behaves:
+
+- **In a channel** — `@yourbot what's blocked in ABC?` It replies in a thread, and that
+  thread is one conversation, so follow-ups keep context.
+- **In a DM** — just type; no mention needed.
+- **`@yourbot reset`** (or "new chat") starts the conversation over.
+- Every reply carries a small context line listing the Jira calls it made.
+- Markdown is converted to Slack formatting — tables become bullet lines, since Slack
+  cannot render a table.
+
+The write confirmation still applies: it asks before creating, updating, transitioning,
+commenting or logging work — in the thread, where your team can see it.
+
 ## Configuration
 
 Every setting is an environment variable; see `.env.example` for the full list with
@@ -100,6 +136,7 @@ comments. The ones worth knowing:
 | `CLAUDE_EFFORT` | `high` | `low`/`medium` are cheaper and faster |
 | `MAX_TOOL_ITERATIONS` | `12` | Tool rounds per message before giving up |
 | `HISTORY_TURNS` | `20` | Conversation turns kept in context |
+| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | — | Slack bot only |
 
 ## Tests
 
@@ -107,10 +144,11 @@ comments. The ones worth knowing:
 python -m pytest
 ```
 
-38 tests, no network and no API spend: the Jira API is a `httpx.MockTransport` and Claude
-is a stub that replays scripted tool-use responses. They cover ADF conversion, request
-shaping for every write path, error handling, the write guard, and the agent loop
-(parallel tool calls, tool errors, runaway loops, history trimming).
+60 tests, no network and no API spend: the Jira API is a `httpx.MockTransport`, Claude is a
+stub that replays scripted tool-use responses, and the Slack client is a stub that records
+what would have been posted. They cover ADF conversion, request shaping for every write
+path, error handling, the write guard, the agent loop (parallel tool calls, tool errors,
+runaway loops, history trimming), session expiry and eviction, and the Slack handlers.
 
 ## Adding a Jira operation
 
@@ -127,6 +165,8 @@ shaping for every write path, error handling, the write guard, and the agent loo
 - **Sessions are in memory**, capped at 200 and expiring after 4 hours. A restart clears
   them; for multiple server processes you'd move them to Redis.
 - **No authentication on the web UI.** Everyone who can reach it acts as your Jira service
-  account. Put it behind your SSO/proxy before exposing it beyond localhost.
+  account. Put it behind your SSO/proxy before exposing it beyond localhost. The same holds
+  in Slack: anyone who can message the bot gets that account's Jira access, so consider
+  `JIRA_ALLOW_WRITES=false` for a bot in a wide channel.
 - Search results are capped at 100 issues per call so a broad query can't exhaust the
   context window; the bot pages with `next_page_token` when it needs more.

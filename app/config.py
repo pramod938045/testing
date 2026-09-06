@@ -43,6 +43,10 @@ class Settings:
     effort: str = field(default_factory=lambda: os.getenv("CLAUDE_EFFORT", "high"))
     max_tokens: int = field(default_factory=lambda: _int("CLAUDE_MAX_TOKENS", 8000))
 
+    # --- Slack (only needed for slack_bot.py) ---
+    slack_bot_token: str = field(default_factory=lambda: os.getenv("SLACK_BOT_TOKEN", ""))
+    slack_app_token: str = field(default_factory=lambda: os.getenv("SLACK_APP_TOKEN", ""))
+
     # --- Behaviour ---
     allow_writes: bool = field(default_factory=lambda: _bool("JIRA_ALLOW_WRITES", True))
     max_tool_iterations: int = field(default_factory=lambda: _int("MAX_TOOL_ITERATIONS", 12))
@@ -67,6 +71,17 @@ class Settings:
             )
         if not self.jira_base_url.startswith(("http://", "https://")):
             raise ConfigError("JIRA_BASE_URL must start with https:// (e.g. https://acme.atlassian.net)")
+
+    def validate_slack(self) -> None:
+        """Extra checks for the Slack bot; the web app doesn't need these."""
+        self.validate()
+        if not self.slack_bot_token.startswith("xoxb-"):
+            raise ConfigError("SLACK_BOT_TOKEN must be the bot token (starts with 'xoxb-').")
+        if not self.slack_app_token.startswith("xapp-"):
+            raise ConfigError(
+                "SLACK_APP_TOKEN must be an app-level token (starts with 'xapp-') with the "
+                "connections:write scope, so the bot can use Socket Mode."
+            )
 
 
 settings = Settings()

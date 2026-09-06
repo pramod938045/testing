@@ -91,10 +91,18 @@ def _as_tool_content(result: Any) -> str:
 class JiraChatAgent:
     """Holds one conversation. Create one per chat session."""
 
-    def __init__(self, jira: JiraClient, settings: Settings, jira_user: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        jira: JiraClient,
+        settings: Settings,
+        jira_user: dict[str, Any] | None = None,
+        extra_instructions: str | None = None,
+    ):
         self.jira = jira
         self.settings = settings
         self.jira_user = jira_user or {}
+        # Surface-specific guidance (e.g. Slack has no markdown tables).
+        self.extra_instructions = extra_instructions
         self.messages: list[dict[str, Any]] = []
         self.client = anthropic.AsyncAnthropic(
             api_key=settings.anthropic_api_key or None,
@@ -121,6 +129,9 @@ class JiraChatAgent:
             context_lines.append(
                 "READ-ONLY MODE: write tools are unavailable. If the user asks for a change, say so."
             )
+        if self.extra_instructions:
+            context_lines.append("")
+            context_lines.append(self.extra_instructions)
         # Stable prefix first, volatile context after, so the cache breakpoint holds.
         return [
             {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},

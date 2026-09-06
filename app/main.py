@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -18,16 +17,17 @@ from pydantic import BaseModel, Field
 from .agent import JiraChatAgent
 from .config import ConfigError, settings
 from .jira_client import JiraClient, JiraError
+from .sessions import SessionStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-SESSION_TTL_SECONDS = 60 * 60 * 4
-MAX_SESSIONS = 200
 
 state: dict[str, Any] = {"jira": None, "jira_user": {}}
-sessions: dict[str, tuple[float, JiraChatAgent]] = {}
+sessions: SessionStore[JiraChatAgent] = SessionStore(
+    factory=lambda: JiraChatAgent(jira=state["jira"], settings=settings, jira_user=state["jira_user"])
+)
 
 
 @asynccontextmanager
@@ -76,26 +76,9 @@ class ChatResponse(BaseModel):
     tool_calls: list[ToolCallOut]
 
 
-def _prune_sessions() -> None:
-    now = time.time()
-    for key in [k for k, (seen, _) in sessions.items() if now - seen > SESSION_TTL_SECONDS]:
-        sessions.pop(key, None)
-    while len(sessions) > MAX_SESSIONS:
-        oldest = min(sessions, key=lambda k: sessions[k][0])
-        sessions.pop(oldest, None)
-
-
 def _get_agent(session_id: str | None) -> tuple[str, JiraChatAgent]:
-    _prune_sessions()
-    if session_id and session_id in sessions:
-        _, agent = sessions[session_id]
-        sessions[session_id] = (time.time(), agent)
-        return session_id, agent
-
-    new_id = session_id or uuid.uuid4().hex
-    agent = JiraChatAgent(jira=state["jira"], settings=settings, jira_user=state["jira_user"])
-    sessions[new_id] = (time.time(), agent)
-    return new_id, agent
+    key = session_id or uuid.uuid4().hex
+    return key, sessions.get(key)
 
 
 @app.get("/")
@@ -154,7 +137,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 async def reset(request: SessionRequest | None = None) -> dict[str, str]:
     session_id = request.session_id if request else None
     if session_id:
-        sessions.pop(session_id, None)
+        sessions.pop(session_id)
     return {"status": "cleared"}
 
 
