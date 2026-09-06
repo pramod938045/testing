@@ -167,8 +167,11 @@ let chatMode = demoMode ? 'demo' : (params.has('jira') ? 'jira' : 'auto');
 const JIRA_CHIPS = [
   'UPAMCORE-30728',
   "What's the status?",
-  'Who is it assigned to?',
-  'Show the description',
+  'Provide the CR ticket for this story',
+  'What stories are under this epic?',
+  "What's assigned to me and not done?",
+  'What is blocked right now?',
+  'Summarise the current sprint',
 ];
 
 function showJiraBar() {

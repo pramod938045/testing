@@ -154,14 +154,37 @@ anything, whoever asks.
 | `/?demo` | Built-in sample issues | nothing |
 
 `/?jira` is the fallback when the AI is unavailable, and the default when no
-`ANTHROPIC_API_KEY` is set. It finds an issue key anywhere in your message
-(`what does UPAMCORE-30728 say?`), fetches that issue with the same
-`JiraClient.get_issue_full()` the lookup page uses, and shows the real key,
-summary, description, status, assignee, reporter, priority, labels, linked
-issues and subtasks. Follow-ups — *what's the status?*, *who is it assigned to?*,
-*show the comments* — are answered from the issue already retrieved, with no
-second request. A missing issue says so; an authentication failure shows Jira's
-own error. Nothing is hardcoded and nothing is written.
+`ANTHROPIC_API_KEY` is set. It answers from live Jira with no AI at all:
+
+| Ask | What it does | Jira call |
+| --- | --- | --- |
+| `UPAMCORE-30728` | Full issue: summary, description, status, assignee, type, parent, links, subtasks | `GET /issue/{key}` |
+| *what's the status?* | Answers from the issue already fetched | none |
+| *provide the CR ticket for this story* | Looks up parent, links and subtasks, and keeps the ones Jira **types** as a Change Request | `POST /search` — `key in (…)` |
+| *what stories are under this epic?* | Real child issues | `POST /search` — `"Epic Link" = K`, else `parent = K` |
+| *what's assigned to me and not done?* | Translates to JQL | `POST /search` |
+| *show bugs updated in the last 7 days* | Translates to JQL | `POST /search` |
+| *what is blocked right now?* | Tries each meaning of "blocked" | `POST /search` |
+| *summarise the current sprint* | Real active sprint, grouped by status and assignee | Agile `board` → `sprint` → `sprint/{id}/issue` |
+| `jql: project = DFE AND …` | Runs your JQL verbatim | `POST /search` |
+
+Two things make this work without an AI. **Scope is decided before content**:
+a question naming its own scope ("assigned to me", "blocked", "bugs in the last
+7 days") is routed to a search *before* the single-issue follow-up rules, which
+match on bare substrings and would otherwise answer "what is blocked right
+now?" with the links of whichever issue was open. And **JQL that varies between
+sites is tried in order**: `statusCategory` falls back to `resolution`, `"Epic
+Link"` to `parent`, and "blocked" walks through link type, status, labels and
+flag until Jira accepts one — so the same translator works on Cloud and Data
+Center without being told which is which. Every reply shows the JQL used.
+
+A CR is identified by the linked issue's **issue type**, never by its key
+prefix or the link name, so an unrelated neighbour is not reported as a change
+request. If several related issues are Change Requests, all are listed with
+their relationships; if none is, it says so and lists what it checked.
+
+A missing issue says why; an authentication failure shows Jira's own error.
+Nothing is hardcoded and nothing is written.
 
 The response says which mode answered, and the page shows a banner for each, so
 it can never be unclear whether data is real.

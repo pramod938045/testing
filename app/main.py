@@ -42,7 +42,9 @@ sessions: SessionStore[JiraChatAgent] = SessionStore(
 demo_sessions: SessionStore[DemoAgent] = SessionStore(factory=DemoAgent)
 # Real Jira, answered without the AI. Kept apart from both other modes.
 jira_sessions: SessionStore[JiraDirectAgent] = SessionStore(
-    factory=lambda: JiraDirectAgent(jira=state["jira"])
+    factory=lambda: JiraDirectAgent(
+        jira=state["jira"], default_project=settings.jira_default_project
+    )
 )
 
 
