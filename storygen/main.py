@@ -11,7 +11,7 @@ import sys
 import anthropic
 
 from .config import Config, ConfigError
-from .generate import generate_stories
+from .generate import SYSTEM, build_prompt, generate_stories
 from .jira import Jira, JiraError, looks_like_key
 
 SUMMARY_FIELDS = ["summary", "status", "issuetype", "updated"]
@@ -154,6 +154,36 @@ def generate(config: Config, key: str, save: str | None) -> int:
     return 0
 
 
+def prompt(config: Config, key: str, save: str | None) -> int:
+    """Print the exact prompt to paste into any AI chat.
+
+    No API key needed — this is the escape hatch when API access isn't
+    available: the tool still does the Jira reading and the prompt writing,
+    and you paste the result into whichever assistant you already have.
+    """
+    config.check_jira()
+    jira = Jira(config.jira_url, config.jira_email, config.jira_token)
+    try:
+        context = jira.get_context(key.strip().upper())
+    finally:
+        jira.close()
+
+    text = f"{SYSTEM}\n\n---\n\n{build_prompt(context)}"
+
+    if save:
+        with open(save, "w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+        print(f"Prompt for {context['key']} written to {save}")
+        print("Open that file, copy everything, and paste it into your AI chat.")
+    else:
+        print("=" * 70)
+        print("Copy everything between the lines into your AI chat:")
+        print("=" * 70)
+        print(text)
+        print("=" * 70)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="storygen", description="Jira AI Story Generator")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -165,6 +195,11 @@ def main(argv: list[str] | None = None) -> int:
     gen_cmd = commands.add_parser("generate", help="Suggest Stories for an issue (read-only)")
     gen_cmd.add_argument("key", help="Issue key, e.g. DFE-9067")
     gen_cmd.add_argument("--save", metavar="FILE", help="Also write the suggestions to a file")
+    prompt_cmd = commands.add_parser(
+        "prompt", help="Print a ready-to-paste AI prompt (no API key needed)"
+    )
+    prompt_cmd.add_argument("key", help="Issue key, e.g. DFE-9067")
+    prompt_cmd.add_argument("--save", metavar="FILE", help="Write the prompt to a file instead")
 
     args = parser.parse_args(argv)
     config = Config.load()
@@ -178,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
             return show(config, args.key)
         if args.command == "generate":
             return generate(config, args.key, args.save)
+        if args.command == "prompt":
+            return prompt(config, args.key, args.save)
     except (ConfigError, JiraError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
