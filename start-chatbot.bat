@@ -21,10 +21,25 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM Check the settings before starting, so problems are readable
+REM instead of arriving as a stack trace.
+python -m app.check
+if errorlevel 1 (
+  echo.
+  pause
+  exit /b 1
+)
+
 echo.
-echo   Starting the chatbot at http://localhost:8000
-echo   Press Ctrl+C in this window to stop it.
+echo   Starting the chatbot. It will open at http://localhost:8000
+echo   Give it a few seconds. Press Ctrl+C in this window to stop it.
 echo.
-start "" http://localhost:8000
+
+REM Open the browser a few seconds AFTER the server starts listening,
+REM otherwise the page loads before anything is there to answer it.
+start "" cmd /c "timeout /t 5 >nul & start """" http://localhost:8000"
+
 python -m uvicorn app.main:app --port 8000
+echo.
+echo   The server stopped. Any error above explains why.
 pause
