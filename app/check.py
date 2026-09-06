@@ -7,13 +7,51 @@ sentence instead of a stack trace from inside uvicorn.
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
-import sys
+from pathlib import Path
 
 from .config import ConfigError, settings
 from .jira_client import JiraClient, JiraError
 
 PORT = 8000
+
+
+def describe_env_file() -> None:
+    """Explain what happened to .env — the usual cause of 'I set it but it says missing'.
+
+    Windows Notepad silently saves ".env" as ".env.txt", which python-dotenv
+    does not read.
+    """
+    here = Path.cwd()
+    dotenv = here / ".env"
+
+    print(f"  Looking in: {here}")
+
+    if dotenv.is_file():
+        keys = []
+        for raw in dotenv.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if line and not line.startswith("#") and "=" in line:
+                name, _, value = line.partition("=")
+                keys.append((name.strip(), bool(value.strip())))
+        print(f"  Found .env with {len(keys)} setting(s):")
+        for name, has_value in keys:
+            print(f"    {name} = {'(a value)' if has_value else '(EMPTY)'}")
+    else:
+        print("  No file named exactly '.env' here.")
+        lookalikes = sorted(
+            p.name for p in here.glob(".env*") if p.is_file() and p.name != ".env"
+        ) + sorted(p.name for p in here.glob("env*") if p.is_file())
+        if lookalikes:
+            print("  But these look close — Windows may have renamed your file:")
+            for name in lookalikes:
+                print(f"    {name}")
+            print("  Rename it to exactly  .env  (no .txt on the end).")
+
+    from_env_var = os.environ.get("ANTHROPIC_API_KEY")
+    if from_env_var:
+        print(f"  ANTHROPIC_API_KEY is set in this window ({len(from_env_var)} characters).")
 
 
 def port_is_free(port: int = PORT) -> bool:
@@ -29,10 +67,21 @@ async def main() -> int:
         print(f"\n  Settings problem:\n  {exc}\n")
         return 1
 
-    if not settings.anthropic_api_key:
-        print("\n  ANTHROPIC_API_KEY is not set in .env.")
-        print("  The page will load but every question will fail.")
-        print("  Get a key at https://console.anthropic.com/settings/keys\n")
+    key = settings.anthropic_api_key
+    if not key:
+        print("\n  ANTHROPIC_API_KEY is not set.")
+        print("  The page will load but every question will fail.\n")
+        describe_env_file()
+        print("\n  Quickest fix — set it in this window and re-run the check:")
+        print("    set ANTHROPIC_API_KEY=sk-ant-your-key-here")
+        print("    python -m app.check")
+        print("\n  Get a key at https://console.anthropic.com/settings/keys\n")
+        return 1
+
+    if not key.startswith("sk-ant-"):
+        print(f"\n  ANTHROPIC_API_KEY is set but looks wrong: it starts with '{key[:6]}'.")
+        print("  An Anthropic key starts with 'sk-ant-'.")
+        print("  Check you pasted the whole key, with no quotes or spaces around it.\n")
         return 1
 
     if not port_is_free():
