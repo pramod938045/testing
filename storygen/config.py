@@ -47,3 +47,12 @@ class Config:
             raise ConfigError(
                 "Missing: " + ", ".join(missing) + "\nCopy .env.example to .env and fill it in."
             )
+
+    def check_ai(self) -> None:
+        """Only needed by the generate command."""
+        if not self.anthropic_key:
+            raise ConfigError(
+                "Missing: ANTHROPIC_API_KEY\n"
+                "Get one at https://console.anthropic.com/settings/keys, then set it "
+                "the same way as the Jira settings."
+            )

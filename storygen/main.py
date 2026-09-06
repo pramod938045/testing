@@ -8,7 +8,10 @@ from __future__ import annotations
 import argparse
 import sys
 
+import anthropic
+
 from .config import Config, ConfigError
+from .generate import generate_stories
 from .jira import Jira, JiraError, looks_like_key
 
 SUMMARY_FIELDS = ["summary", "status", "issuetype", "updated"]
@@ -95,6 +98,62 @@ def show(config: Config, key: str) -> int:
     return 0
 
 
+def _render(key: str, result: dict) -> str:
+    """The review text: what the AI suggests, for a human to judge."""
+    lines = [f"# Suggested Stories for {key}", ""]
+    stories = result.get("stories") or []
+
+    for index, story in enumerate(stories, start=1):
+        lines.append(f"## Story {index}: {story.get('summary', '')}")
+        lines.append("")
+        if story.get("user_story"):
+            lines.append(story["user_story"])
+            lines.append("")
+        if story.get("details"):
+            lines.append(story["details"])
+            lines.append("")
+        criteria = story.get("acceptance_criteria") or []
+        if criteria:
+            lines.append("Acceptance criteria:")
+            lines += [f"  - {item}" for item in criteria]
+            lines.append("")
+
+    questions = result.get("open_questions") or []
+    if questions:
+        lines.append("## Open questions (the issue does not answer these)")
+        lines += [f"  - {item}" for item in questions]
+        lines.append("")
+
+    lines.append(f"({len(stories)} stories suggested. Nothing has been created in Jira.)")
+    return "\n".join(lines)
+
+
+def generate(config: Config, key: str, save: str | None) -> int:
+    config.check_jira()
+    config.check_ai()
+
+    jira = Jira(config.jira_url, config.jira_email, config.jira_token)
+    try:
+        context = jira.get_context(key.strip().upper())
+    finally:
+        jira.close()
+
+    if not context["description"]:
+        print(f"Warning: {context['key']} has no description — suggestions will be thin.\n")
+
+    print(f"Reading {context['key']} and asking {config.model}… (this takes a few seconds)\n")
+    result = generate_stories(context, config.anthropic_key, config.model)
+
+    text = _render(context["key"], result)
+    print(text)
+
+    if save:
+        with open(save, "w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+        print(f"\nSaved to {save}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="storygen", description="Jira AI Story Generator")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -103,6 +162,9 @@ def main(argv: list[str] | None = None) -> int:
     find_cmd.add_argument("query", help="An issue key (ABC-42) or text to search for")
     show_cmd = commands.add_parser("show", help="Read one issue: description and linked issues")
     show_cmd.add_argument("key", help="Issue key, e.g. DFE-9067")
+    gen_cmd = commands.add_parser("generate", help="Suggest Stories for an issue (read-only)")
+    gen_cmd.add_argument("key", help="Issue key, e.g. DFE-9067")
+    gen_cmd.add_argument("--save", metavar="FILE", help="Also write the suggestions to a file")
 
     args = parser.parse_args(argv)
     config = Config.load()
@@ -114,8 +176,22 @@ def main(argv: list[str] | None = None) -> int:
             return find(config, args.query)
         if args.command == "show":
             return show(config, args.key)
+        if args.command == "generate":
+            return generate(config, args.key, args.save)
     except (ConfigError, JiraError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except anthropic.AuthenticationError:
+        print("Error: the AI rejected your key. Check ANTHROPIC_API_KEY.", file=sys.stderr)
+        return 1
+    except anthropic.RateLimitError:
+        print("Error: the AI is rate limiting. Wait a moment and try again.", file=sys.stderr)
+        return 1
+    except anthropic.APIConnectionError:
+        print("Error: could not reach the AI service. Check your network.", file=sys.stderr)
+        return 1
+    except (anthropic.APIStatusError, RuntimeError, ValueError) as exc:
+        print(f"Error from the AI: {exc}", file=sys.stderr)
         return 1
     return 0
 
