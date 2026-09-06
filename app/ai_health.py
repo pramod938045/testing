@@ -44,10 +44,41 @@ async def check_anthropic() -> dict[str, Any]:
 
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=1)
     try:
-        # A GET that validates auth without generating tokens.
+        # Authentication first, with a GET that costs nothing.
         await client.models.list(limit=1)
+        result["key_valid"] = True
+
+        # Then the question that actually matters: can this account generate?
+        # models.list succeeds on an account with no credit, so checking auth
+        # alone would report "ok" while every chat message still failed. This
+        # costs one input and one output token — a fraction of a cent.
+        await client.messages.create(
+            model=settings.model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+        )
         result["anthropic"] = "ok"
         result["model"] = settings.model
+    except anthropic.BadRequestError as exc:
+        # A valid key on an account with no credit authenticates fine but
+        # cannot generate, so say that rather than "bad request".
+        if "credit balance" in str(exc).lower():
+            result["anthropic"] = "no credit"
+            result["fix"] = (
+                "The key is valid, but the Anthropic account has no credit, so no "
+                "question can be answered. Add funds under Plans & Billing at "
+                "https://console.anthropic.com/settings/billing — or get added to an "
+                "organisation that already has billing."
+            )
+        else:
+            result["anthropic"] = "bad request (400)"
+            result["fix"] = str(exc)[:200]
+    except anthropic.NotFoundError:
+        result["anthropic"] = "model not available"
+        result["fix"] = (
+            f"The account cannot use '{settings.model}'. Set CLAUDE_MODEL in .env to a "
+            "model it has access to."
+        )
     except anthropic.AuthenticationError:
         result["anthropic"] = "rejected (401)"
         result["fix"] = (

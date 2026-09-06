@@ -65,6 +65,7 @@ async def main() -> int:
         settings.validate()
     except ConfigError as exc:
         print(f"\n  Settings problem:\n  {exc}\n")
+        print("  Fix it by running:  python -m app.setup\n")
         return 1
 
     key = settings.anthropic_api_key
@@ -72,9 +73,9 @@ async def main() -> int:
         print("\n  ANTHROPIC_API_KEY is not set.")
         print("  The page will load but every question will fail.\n")
         describe_env_file()
-        print("\n  Quickest fix — set it in this window and re-run the check:")
-        print("    set ANTHROPIC_API_KEY=sk-ant-your-key-here")
-        print("    python -m app.check")
+        print("\n  Fix: save your settings to a .env file, which survives closing")
+        print("  this window — no `set` commands needed:")
+        print("    python -m app.setup")
         print("\n  Get a key at https://console.anthropic.com/settings/keys\n")
         return 1
 

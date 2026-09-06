@@ -21,16 +21,28 @@ def set_key(monkeypatch, value, in_dotenv=None, dotenv_path="/repo/.env"):
     )
 
 
-def fake_client(error=None):
+def fake_client(error=None, auth_error=None, calls=None):
+    """A stub client. `auth_error` fails models.list; `error` fails messages.create."""
+
     class Models:
         async def list(self, **kwargs):
+            if calls is not None:
+                calls.append("models.list")
+            if auth_error:
+                raise auth_error
+            return object()
+
+    class Messages:
+        async def create(self, **kwargs):
+            if calls is not None:
+                calls.append("messages.create")
             if error:
                 raise error
             return object()
 
     class Client:
         def __init__(self, **kwargs):
-            self.models = Models()
+            self.models, self.messages = Models(), Messages()
 
         async def close(self):
             pass
@@ -38,10 +50,10 @@ def fake_client(error=None):
     return Client
 
 
-def api_error(cls, status):
-    request = httpx.Request("GET", "https://api.anthropic.com/v1/models")
-    response = httpx.Response(status, request=request, json={"error": {"message": "nope"}})
-    return cls("nope", response=response, body=None)
+def api_error(cls, status, message="nope"):
+    request = httpx.Request("GET", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status, request=request, json={"error": {"message": message}})
+    return cls(message, response=response, body=None)
 
 
 # --- key reporting ---------------------------------------------------------
@@ -119,7 +131,9 @@ async def test_rejected_key_explains_the_shell_override(monkeypatch):
     """The exact failure the user hit: a stale shell key beating .env."""
     set_key(monkeypatch, REAL_LOOKING, in_dotenv="sk-ant-api03-" + "z" * 90)
     monkeypatch.setattr(
-        anthropic, "AsyncAnthropic", fake_client(api_error(anthropic.AuthenticationError, 401))
+        anthropic,
+        "AsyncAnthropic",
+        fake_client(auth_error=api_error(anthropic.AuthenticationError, 401)),
     )
     result = await ai_health.check_anthropic()
 
@@ -128,12 +142,26 @@ async def test_rejected_key_explains_the_shell_override(monkeypatch):
     assert "overriding" in result["warning"] and "open a new one" in result["warning"]
 
 
+async def test_a_valid_key_with_no_credit_says_so(monkeypatch):
+    """The account authenticates but cannot generate — the real blocker here."""
+    set_key(monkeypatch, REAL_LOOKING)
+    error = api_error(
+        anthropic.BadRequestError, 400, "Your credit balance is too low to access the API."
+    )
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", fake_client(error))
+
+    result = await ai_health.check_anthropic()
+    assert result["anthropic"] == "no credit"
+    assert "billing" in result["fix"].lower()
+
+
 @pytest.mark.parametrize(
     "error,expected",
     [
         (api_error(anthropic.PermissionDeniedError, 403), "forbidden (403)"),
         (api_error(anthropic.RateLimitError, 429), "rate limited (429)"),
         (api_error(anthropic.InternalServerError, 500), "api error (500)"),
+        (api_error(anthropic.NotFoundError, 404), "model not available"),
         (anthropic.APIConnectionError(request=httpx.Request("GET", "https://x")), "unreachable"),
     ],
 )
@@ -156,27 +184,44 @@ async def test_no_failure_path_leaks_the_key(monkeypatch):
         assert REAL_LOOKING not in repr(await ai_health.check_anthropic())
 
 
-async def test_the_check_costs_no_tokens(monkeypatch):
-    """It must authenticate with models.list, never by generating a message."""
-    set_key(monkeypatch, REAL_LOOKING)
-    used = []
+async def test_the_check_verifies_auth_then_generation(monkeypatch):
+    """models.list succeeds with no credit, so auth alone is not enough.
 
-    class Models:
-        async def list(self, **kwargs):
-            used.append("models.list")
-            return object()
+    The check must also attempt a generation, or it reports "ok" for an
+    account that cannot answer a single question.
+    """
+    set_key(monkeypatch, REAL_LOOKING)
+    calls = []
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", fake_client(calls=calls))
+
+    await ai_health.check_anthropic()
+    assert calls == ["models.list", "messages.create"]
+
+
+async def test_the_generation_probe_is_one_token(monkeypatch):
+    """Kept minimal: the check must never cost more than a fraction of a cent."""
+    set_key(monkeypatch, REAL_LOOKING)
+    sent = {}
 
     class Messages:
         async def create(self, **kwargs):
-            raise AssertionError("the health check must not spend tokens")
+            sent.update(kwargs)
+            return object()
 
     class Client:
         def __init__(self, **kwargs):
-            self.models, self.messages = Models(), Messages()
+            self.messages = Messages()
+            self.models = type("M", (), {"list": lambda s, **k: _done()})()
 
         async def close(self):
             pass
 
+    async def _noop():
+        return object()
+
+    def _done():
+        return _noop()
+
     monkeypatch.setattr(anthropic, "AsyncAnthropic", Client)
     await ai_health.check_anthropic()
-    assert used == ["models.list"]
+    assert sent["max_tokens"] == 1
