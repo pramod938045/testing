@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from .agent import JiraChatAgent
 from .ai_health import check_anthropic
 from .config import ConfigError, settings
+from .demo_agent import DemoAgent
 from .jira_client import JiraClient, JiraError
 from .sessions import SessionStore
 
@@ -31,6 +32,8 @@ state: dict[str, Any] = {"jira": None, "jira_user": {}}
 sessions: SessionStore[JiraChatAgent] = SessionStore(
     factory=lambda: JiraChatAgent(jira=state["jira"], settings=settings, jira_user=state["jira_user"])
 )
+# Demo conversations are kept apart so they can never mix with real ones.
+demo_sessions: SessionStore[DemoAgent] = SessionStore(factory=DemoAgent)
 
 
 @asynccontextmanager
@@ -60,6 +63,7 @@ app = FastAPI(title="Jira Chatbot", version="1.0.0", lifespan=lifespan)
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     session_id: str | None = None
+    demo: bool = False
 
 
 class SessionRequest(BaseModel):
@@ -79,9 +83,9 @@ class ChatResponse(BaseModel):
     tool_calls: list[ToolCallOut]
 
 
-def _get_agent(session_id: str | None) -> tuple[str, JiraChatAgent]:
+def _get_agent(session_id: str | None, demo: bool = False) -> tuple[str, Any]:
     key = session_id or uuid.uuid4().hex
-    return key, sessions.get(key)
+    return key, (demo_sessions if demo else sessions).get(key)
 
 
 @app.get("/")
@@ -146,6 +150,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
     if state.get("jira") is None:
         raise HTTPException(status_code=503, detail="Jira client is not configured.")
 
+    # Demo mode answers from sample data: no key, no Jira, no AI call.
+    if request.demo:
+        session_id, agent = _get_agent(request.session_id, demo=True)
+        result = await agent.chat(request.message.strip())
+        return ChatResponse(
+            session_id=session_id,
+            reply=result.reply,
+            tool_calls=[ToolCallOut(**asdict(call)) for call in result.tool_calls],
+        )
+
     # Without a key the SDK raises a TypeError deep inside the request, which
     # would surface as a plain-text 500 the browser cannot parse. Say it plainly.
     if not settings.anthropic_api_key:
@@ -154,7 +168,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
             detail=(
                 "No Anthropic API key is configured, so I cannot answer questions. "
                 "Run `python -m app.setup` to add one, then restart the server. "
-                "Ticket lookup at /lookup works without a key."
+                "To see how the chat works meanwhile, open /?demo — and ticket "
+                "lookup at /lookup reads your real Jira without a key."
             ),
         )
 
@@ -201,6 +216,7 @@ async def reset(request: SessionRequest | None = None) -> dict[str, str]:
     session_id = request.session_id if request else None
     if session_id:
         sessions.pop(session_id)
+        demo_sessions.pop(session_id)
     return {"status": "cleared"}
 
 

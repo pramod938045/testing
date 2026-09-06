@@ -140,12 +140,20 @@ python -m storygen.main show DEMO-1 --demo       # a sample Epic in full
 python -m storygen.main generate DEMO-7 --demo   # sample Story suggestions
 ```
 
+The chat UI has the same thing at **http://localhost:8000/?demo** — a working
+conversation with no key at all. A yellow bar marks it, the suggestions become
+demo questions, every reply ends "sample data, not your Jira", and demo
+conversations are stored apart from real ones. When a chat fails for a missing
+key or no credit, the error offers a link to it.
+
 The sample set is one Epic (`DEMO-1`, self-service account closure) and one
 Change Request (`DEMO-7`, first time deposit tracking), written in the same
 shape real issues come back in, so the same rendering code runs either way.
-Output is prefixed `[demo]` and the keys all start `DEMO-`, so it cannot be
-mistaken for real data. Tests fail if a demo run constructs a Jira client or
-calls the AI.
+CLI output is prefixed `[demo]` and the keys all start `DEMO-`, so it cannot be
+mistaken for real data. Demo mode is opt-in everywhere: without the flag the
+commands still need Jira settings, and the endpoint still reports a missing key
+rather than quietly answering from samples. Tests fail if a demo run constructs
+a Jira client or calls the AI.
 
 ## Configuration
 
