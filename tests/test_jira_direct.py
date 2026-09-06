@@ -265,3 +265,76 @@ def test_the_page_offers_real_jira_mode():
     assert "params.has('jira')" in page
     assert "jiraBar" in page
     assert "mode: chatMode" in page
+
+
+# --- diagnosing a 404 -------------------------------------------------------
+
+PROJECTS = {"values": [
+    {"key": "DFE", "name": "Digital Front End", "id": "1"},
+    {"key": "UPAM", "name": "UPAM", "id": "2"},
+]}
+
+
+def routed(routes):
+    """Handler dispatching on path, so a 404 can also answer a project query."""
+
+    def handler(request):
+        for fragment, (status, payload) in routes.items():
+            if fragment in str(request.url):
+                return httpx.Response(status, json=payload)
+        return httpx.Response(404, json={"errorMessages": ["not found"]})
+
+    return handler
+
+
+async def test_a_missing_project_says_the_key_is_from_another_site():
+    """UPAMCORE-30728: the key's project does not exist on this Jira at all."""
+    agent = agent_for(routed({
+        "/issue/": (404, {"errorMessages": ["Issue does not exist"]}),
+        "/project/search": (200, PROJECTS),
+    }))
+    reply = (await agent.chat("UPAMCORE-30728")).reply
+
+    assert "not found" in reply.lower()
+    assert "no project **UPAMCORE**" in reply
+    assert "different Jira site" in reply
+    assert "DFE" in reply and "UPAM" in reply, "show what this account can see"
+    await agent.jira.aclose()
+
+
+async def test_an_existing_project_points_at_the_issue_number_instead():
+    def handler(request):
+        if "/issue/" in str(request.url):
+            return httpx.Response(404, json={"errorMessages": ["Issue does not exist"]})
+        return httpx.Response(200, json={"values": [{"key": "DFE", "name": "DFE", "id": "1"}]})
+
+    agent = agent_for(handler)
+    reply = (await agent.chat("DFE-999999")).reply
+
+    assert "Project **DFE** does exist" in reply
+    assert "issue number is probably wrong" in reply
+    await agent.jira.aclose()
+
+
+async def test_the_project_list_can_be_asked_for():
+    agent = agent_for(routed({"/project/search": (200, PROJECTS)}))
+    result = await agent.chat("what projects can I see?")
+
+    assert "DFE" in result.reply and "Digital Front End" in result.reply
+    assert result.tool_calls[0].name == "list_projects"
+    await agent.jira.aclose()
+
+
+async def test_a_404_diagnosis_never_hides_an_auth_failure():
+    """A 401 while diagnosing must not be reported as a missing project."""
+    def handler(request):
+        if "/issue/" in str(request.url):
+            return httpx.Response(404, json={"errorMessages": ["Issue does not exist"]})
+        return httpx.Response(401, json={"errorMessages": ["Client must be authenticated"]})
+
+    agent = agent_for(handler)
+    reply = (await agent.chat("UPAMCORE-30728")).reply
+
+    assert "no project" not in reply.lower(), "cannot claim the project is missing"
+    assert "permission" in reply.lower() or "does not exist" in reply.lower()
+    await agent.jira.aclose()

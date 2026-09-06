@@ -26,7 +26,8 @@ DESCRIPTION_LIMIT = 2000
 
 HELP = (
     "I'm reading your real Jira, but without the AI I can only do a few things:\n\n"
-    "- **Type an issue key** — e.g. `UPAMCORE-30728` — and I'll fetch it from Jira\n"
+    "- **Type an issue key** — e.g. `DFE-9067` — and I'll fetch it from Jira\n"
+    "- Ask **what projects can I see?** to find the right key prefix\n"
     "- Then ask follow-ups about it: *what's the status?*, *who is it assigned to?*, "
     "*show the description*, *any linked issues?*, *show the comments*\n\n"
     "For free-form questions across many issues, the AI mode is needed — that "
@@ -179,6 +180,10 @@ class JiraDirectAgent:
         return ChatResult(reply=reply, tool_calls=calls)
 
     async def _answer(self, message: str) -> tuple[str, list[ToolCallRecord]]:
+        text = message.lower()
+        if "project" in text and any(w in text for w in ("what", "which", "list", "show", "see")):
+            return await self._list_projects()
+
         keys = find_keys(message)
 
         if keys:
@@ -203,16 +208,76 @@ class JiraDirectAgent:
 
         return HELP, []
 
+    async def _list_projects(self) -> tuple[str, list[ToolCallRecord]]:
+        """Which projects this account can see — the fastest way to find a key prefix."""
+        try:
+            projects = (await self.jira.list_projects(limit=50)).get("projects") or []
+        except JiraError as exc:
+            return (
+                f"Could not list projects:\n\n> {exc.message}",
+                [ToolCallRecord("list_projects", {}, False, exc.message[:200])],
+            )
+
+        call = ToolCallRecord("list_projects", {}, True, f'{{"count": {len(projects)}}}')
+        if not projects:
+            return (f"Your account can see no projects on {self.jira.base_url}.", [call])
+
+        lines = [f"**{len(projects)} project(s)** on {self.jira.base_url}:", ""]
+        lines += [
+            f"- **{project['key']}** — {project['name']}"
+            for project in sorted(projects, key=lambda p: p["key"])
+        ]
+        lines.append("")
+        lines.append("Type an issue key from one of these, e.g. `DFE-9067`.")
+        return "\n".join(lines), [call]
+
+    async def _why_not_found(self, key: str) -> str:
+        """Say *why* a key is missing: wrong project, or wrong issue number.
+
+        A bare "not found" leaves the user guessing between a typo, a
+        permissions problem, and the key belonging to a different Jira site.
+        Checking whether the project itself exists separates those cases.
+        """
+        prefix = key.split("-")[0]
+        site = self.jira.base_url
+
+        try:
+            matches = (await self.jira.list_projects(query=prefix)).get("projects") or []
+        except JiraError:
+            return (
+                "Either it does not exist, or your account cannot see it. "
+                "Check the key and the project's permissions."
+            )
+
+        if any(project["key"].upper() == prefix for project in matches):
+            return (
+                f"Project **{prefix}** does exist on {site}, so the issue number is probably "
+                "wrong, the issue was deleted or moved, or your account lacks permission "
+                "for that project."
+            )
+
+        try:
+            visible = (await self.jira.list_projects(limit=50)).get("projects") or []
+        except JiraError:
+            visible = []
+
+        lines = [
+            f"There is no project **{prefix}** on {site} — so this key belongs to a "
+            "different Jira site, or the project name is different here."
+        ]
+        if visible:
+            names = ", ".join(sorted(project["key"] for project in visible)[:25])
+            lines.append("")
+            lines.append(f"Projects your account can see here ({len(visible)}): {names}")
+        return "\n".join(lines)
+
     async def _fetch(self, key: str) -> tuple[str, ToolCallRecord]:
         """Fetch one real issue, reporting Jira's own error if it fails."""
         try:
             issue = await self.jira.get_issue_full(key)
         except JiraError as exc:
             if exc.status_code == 404:
-                reply = (
-                    f"**{key}** was not found in Jira. Either it does not exist, or your "
-                    "account cannot see it. Check the key and the project's permissions."
-                )
+                reply = f"**{key}** was not found in Jira.\n\n" + await self._why_not_found(key)
             elif exc.status_code in (401, 403):
                 # Requirement: show the real authentication error, not a generic one.
                 reply = f"Jira refused the request for **{key}**:\n\n> {exc.message}"
