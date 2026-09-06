@@ -74,71 +74,6 @@ async def test_get_issue_includes_the_rendered_description(make_client):
     await client.aclose()
 
 
-async def test_create_issue_sends_adf_description(make_client):
-    client, seen = make_client({"POST /rest/api/3/issue": {"key": "ABC-9"}})
-    result = await client.create_issue(
-        project_key="ABC", summary="New task", issue_type="Task", description="line one"
-    )
-
-    assert result == {
-        "created": True,
-        "key": "ABC-9",
-        "url": "https://example.atlassian.net/browse/ABC-9",
-    }
-    fields = json.loads(seen[0].content)["fields"]
-    assert fields["project"] == {"key": "ABC"}
-    assert fields["issuetype"] == {"name": "Task"}
-    assert fields["description"]["type"] == "doc"
-    await client.aclose()
-
-
-async def test_update_issue_only_sends_the_changed_fields(make_client):
-    client, seen = make_client({"PUT /rest/api/3/issue/ABC-1": None})
-    result = await client.update_issue("ABC-1", priority="Low")
-
-    assert result["changed"] == ["priority"]
-    assert json.loads(seen[0].content) == {"fields": {"priority": {"name": "Low"}}}
-    await client.aclose()
-
-
-async def test_update_issue_without_fields_is_rejected(make_client):
-    client, seen = make_client({})
-    with pytest.raises(JiraError):
-        await client.update_issue("ABC-1")
-    assert seen == []
-    await client.aclose()
-
-
-async def test_transition_issue_resolves_the_transition_id(make_client):
-    client, seen = make_client(
-        {
-            "GET /rest/api/3/issue/ABC-1/transitions": {
-                "transitions": [{"id": "31", "name": "Done", "to": {"name": "Done"}}]
-            },
-            "POST /rest/api/3/issue/ABC-1/transitions": None,
-        }
-    )
-    result = await client.transition_issue("ABC-1", "done")  # case-insensitive
-
-    assert result["transitioned"] is True
-    assert json.loads(seen[1].content) == {"transition": {"id": "31"}}
-    await client.aclose()
-
-
-async def test_transition_issue_lists_the_options_when_there_is_no_match(make_client):
-    client, _ = make_client(
-        {
-            "GET /rest/api/3/issue/ABC-1/transitions": {
-                "transitions": [{"id": "21", "name": "Start", "to": {"name": "In Progress"}}]
-            }
-        }
-    )
-    with pytest.raises(JiraError) as exc:
-        await client.transition_issue("ABC-1", "Released")
-    assert "In Progress" in exc.value.message
-    await client.aclose()
-
-
 async def test_sprint_report_groups_by_status_and_assignee(make_client):
     unassigned = {
         "key": "ABC-2",
@@ -166,24 +101,51 @@ async def test_api_errors_carry_the_jira_message_and_a_hint(make_client):
     await client.aclose()
 
 
-async def test_field_level_errors_are_reported(make_client):
-    client, _ = make_client(
-        {"POST /rest/api/3/issue": (400, {"errors": {"summary": "Summary is required."}})}
-    )
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/rest/api/3/issue"),
+        ("PUT", "/rest/api/3/issue/ABC-1"),
+        ("DELETE", "/rest/api/3/issue/ABC-1"),
+        ("POST", "/rest/api/3/issue/ABC-1/comment"),
+        ("POST", "/rest/api/3/issue/ABC-1/transitions"),
+        ("POST", "/rest/api/3/issue/ABC-1/worklog"),
+        ("PUT", "/rest/api/3/issue/ABC-1/assignee"),
+    ],
+)
+async def test_writes_are_refused_and_never_reach_jira(method, path, make_client):
+    """The chatbot must not be able to change Jira, whatever the model asks for."""
+    client, seen = make_client({})
+
     with pytest.raises(JiraError) as exc:
-        await client.create_issue("ABC", "")
-    assert "summary: Summary is required." in exc.value.message
+        await client._request(method, path)
+
+    assert "read-only" in exc.value.message
+    assert seen == [], f"{method} {path} reached the network"
     await client.aclose()
 
 
-async def test_log_work_posts_a_worklog(make_client):
+async def test_reads_still_reach_jira(make_client):
     client, seen = make_client(
-        {"POST /rest/api/3/issue/ABC-1/worklog": {"id": "100", "timeSpent": "2h"}}
+        {
+            "GET /rest/api/3/myself": {"displayName": "Sam Patel"},
+            "POST /rest/api/3/search/jql": {"issues": []},
+        }
     )
-    result = await client.log_work("ABC-1", "2h", comment="pairing")
+    await client.myself()
+    await client.search("project = ABC")
 
-    assert result["logged"] is True
-    body = json.loads(seen[0].content)
-    assert body["timeSpent"] == "2h"
-    assert body["comment"]["type"] == "doc"
+    assert [f"{r.method} {r.url.path}" for r in seen] == [
+        "GET /rest/api/3/myself",
+        "POST /rest/api/3/search/jql",
+    ]
     await client.aclose()
+
+
+def test_the_client_exposes_no_write_methods():
+    from app.jira_client import JiraClient
+
+    forbidden = ("create", "update", "delete", "add_", "transition_issue", "assign", "log_work")
+    methods = [m for m in dir(JiraClient) if not m.startswith("__")]
+    offenders = [m for m in methods if any(m.startswith(word) for word in forbidden)]
+    assert offenders == [], f"unexpected write-shaped methods: {offenders}"

@@ -1,8 +1,8 @@
 """The chat agent: Claude + the Jira tools, driven by a manual tool-use loop.
 
 A manual loop (rather than the SDK's beta tool runner) is used deliberately —
-it lets the server report every tool call back to the browser so the UI can
-show what the bot actually did in Jira, and keeps the write-guard in one place.
+it lets the server report every tool call back to the browser, so the user can
+see exactly which Jira reads answered their question.
 """
 
 from __future__ import annotations
@@ -22,35 +22,32 @@ from .tools import execute_tool, tool_definitions
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a Jira assistant. You help the user query and manage their Jira Cloud site \
-through the tools you have been given. You are talking to them in a chat window.
+SYSTEM_PROMPT = """You are a Jira assistant. You help the user read and understand their Jira Cloud \
+site through the tools you have been given. You are talking to them in a chat window.
+
+## Read-only
+You can only read Jira. You cannot create, edit, transition, comment on, delete or assign \
+anything, and you have no tools that would let you. If the user asks for a change, say plainly \
+that you are read-only and tell them what you can show them instead. Never claim to have made \
+a change, and never say you will make one.
 
 ## How to work
-- Answer from real Jira data. Never invent issue keys, statuses, assignees, sprint names or counts — \
-if you do not have the data, call a tool.
+- Answer from real Jira data. Never invent issue keys, statuses, assignees, sprint names or \
+counts — if you do not have the data, call a tool.
 - Prefer one well-built JQL query over many small lookups. `search_issues` handles most questions.
+- To show what a story or issue actually says, use `get_issue` — it returns the full description.
 - "me"/"my"/"mine" means the authenticated Jira user: use `assignee = currentUser()` in JQL.
 - "this sprint"/"current sprint" is `sprint in openSprints()`. For a sprint digest grouped by status \
 and assignee, get the board with `list_boards`, the sprint with `list_sprints`, then `sprint_report`.
-- Resolve people to an account id with `find_user` before assigning anything. If several users match, \
-ask which one.
 - If a project is named in words rather than by key, resolve it with `list_projects` first.
 - When a tool returns an error, tell the user plainly what failed and what would fix it. Do not retry \
 the identical call.
-
-## Making changes
-Creating issues, updating fields, transitioning status, commenting and logging work all change real \
-data that other people see.
-- Before the first write of a request, restate exactly what you are about to do (project, issue key, \
-field values, comment text) and ask the user to confirm. Wait for a clear yes.
-- Once the user has confirmed a specific action, carry it out fully without asking again.
-- If a request is ambiguous about *which* issue, ask before writing — never guess at an issue key.
-- After a successful write, report what changed and include the issue link.
 
 ## Style
 - Be concise and factual. Lead with the answer.
 - Format issue lists as markdown lists: `**KEY** — summary _(Status, Assignee)_`.
 - Use a markdown table only when comparing more than about six issues across several fields.
+- When quoting an issue description, keep the author's own wording rather than paraphrasing it.
 - Include the issue URL when the user will want to click through; do not paste a wall of links.
 - Say "no matching issues" plainly when a search comes back empty — that is a valid answer."""
 
@@ -125,10 +122,9 @@ class JiraChatAgent:
             context_lines.append(
                 f"Default project when the user does not name one: {self.settings.jira_default_project}"
             )
-        if not self.settings.allow_writes:
-            context_lines.append(
-                "READ-ONLY MODE: write tools are unavailable. If the user asks for a change, say so."
-            )
+        context_lines.append(
+            "This assistant is READ-ONLY: it has no tools that can change Jira."
+        )
         if self.extra_instructions:
             context_lines.append("")
             context_lines.append(self.extra_instructions)
@@ -172,7 +168,7 @@ class JiraChatAgent:
         self.messages.append({"role": "user", "content": user_message})
         self._trim_history()
 
-        tools = tool_definitions(self.settings.allow_writes)
+        tools = tool_definitions()
         records: list[ToolCallRecord] = []
         response = None
 
@@ -202,7 +198,7 @@ class JiraChatAgent:
             # Parallel calls must all be executed and returned in ONE user message.
             results = await asyncio.gather(
                 *(
-                    execute_tool(self.jira, block.name, dict(block.input), self.settings.allow_writes)
+                    execute_tool(self.jira, block.name, dict(block.input))
                     for block in tool_uses
                 )
             )

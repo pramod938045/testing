@@ -41,8 +41,7 @@ async def main() -> int:
     one_shot = " ".join(sys.argv[1:]).strip()
 
     print(f"{BOLD}Jira chatbot{RESET} — {settings.jira_base_url} as {user.get('display_name')}")
-    if not settings.allow_writes:
-        print(f"{DIM}read-only mode{RESET}")
+    print(f"{DIM}read-only — this assistant cannot change Jira{RESET}")
     if not one_shot:
         print(f"{DIM}Ctrl-C or 'exit' to quit, '/reset' to clear the conversation.{RESET}\n")
 

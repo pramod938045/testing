@@ -1,8 +1,8 @@
-"""Conversion helpers between plain text and Atlassian Document Format (ADF).
+"""Read Atlassian Document Format (ADF) as plain text.
 
-Jira Cloud's REST API v3 stores rich text (descriptions, comments, worklog
-comments) as ADF documents rather than wiki markup, so every write needs
-`text_to_adf` and every read needs `adf_to_text`.
+Jira Cloud's REST API v3 returns rich text (descriptions, comments) as nested
+ADF documents rather than strings, so every read goes through `adf_to_text`.
+There is no text->ADF direction: this assistant never writes to Jira.
 """
 
 from __future__ import annotations
@@ -10,32 +10,6 @@ from __future__ import annotations
 from typing import Any
 
 _LIST_TYPES = {"bulletList", "orderedList"}
-
-
-def text_to_adf(text: str) -> dict[str, Any]:
-    """Wrap plain text in a minimal ADF document.
-
-    Blank lines separate paragraphs; single newlines become hard breaks so the
-    text renders in Jira the way the user typed it.
-    """
-    doc: dict[str, Any] = {"type": "doc", "version": 1, "content": []}
-    if not text:
-        doc["content"].append({"type": "paragraph"})
-        return doc
-
-    for block in text.replace("\r\n", "\n").split("\n\n"):
-        lines = block.split("\n")
-        content: list[dict[str, Any]] = []
-        for index, line in enumerate(lines):
-            if index:
-                content.append({"type": "hardBreak"})
-            if line:
-                content.append({"type": "text", "text": line})
-        paragraph: dict[str, Any] = {"type": "paragraph"}
-        if content:
-            paragraph["content"] = content
-        doc["content"].append(paragraph)
-    return doc
 
 
 def adf_to_text(node: Any, _depth: int = 0) -> str:

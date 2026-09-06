@@ -92,7 +92,7 @@ async def health() -> dict[str, Any]:
     result: dict[str, Any] = {
         "jira_base_url": settings.jira_base_url,
         "model": settings.model,
-        "writes_enabled": settings.allow_writes,
+        "read_only": True,
         "active_sessions": len(sessions),
     }
     if jira is None:

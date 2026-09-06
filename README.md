@@ -1,8 +1,10 @@
 # Jira Chatbot
 
-A chatbot for Jira Cloud. Ask questions in plain English — "what's assigned to me and not
-done?", "summarise the current sprint", "log 2h on ABC-42" — and it works out which Jira
-API calls to make, runs them, and answers from the real data.
+A read-only chatbot for Jira Cloud. Ask questions in plain English — "what's assigned to me
+and not done?", "summarise the current sprint", "what does DFE-9067 say?" — and it works out
+which Jira API calls to make, runs them, and answers from the real data.
+
+It cannot change anything in Jira. That is enforced in code (see below), not by a setting.
 
 Claude does the language understanding via tool-calling; the Jira REST API does the work.
 Three front ends — a browser chat UI, a Slack bot, and a terminal client — share one agent.
@@ -10,25 +12,28 @@ Three front ends — a browser chat UI, a Slack bot, and a terminal client — s
 ```
 browser (app/main.py)  ─┐
 Slack   (slack_bot.py) ─┼─> JiraChatAgent (app/agent.py)   tool-use loop with Claude
-CLI     (cli.py)       ─┘      -> tools (app/tools.py)     15 Jira operations
+CLI     (cli.py)       ─┘      -> tools (app/tools.py)     9 read-only operations
                                   -> JiraClient (app/jira_client.py)  REST v3 + Agile v1.0
 ```
 
 ## What it can do
 
-**Read** — JQL search, issue detail, comments, projects, users, issue types, boards, sprints.
-**Write** — create issues, update fields (summary, description, assignee, priority, labels,
-due date), transition status, comment, log work.
-**Report** — `sprint_report` returns every issue in a sprint plus counts by status and by
-assignee, which is what the standup/blocker/status summaries are built from.
+**It reads Jira; it never writes.** JQL search, issue detail (including the full
+description), comments, projects, users, boards, sprints, and `sprint_report` — every issue
+in a sprint plus counts by status and assignee, which the standup/blocker/status summaries
+are built from.
 
-Two guards on the write side:
+**Read-only is enforced in code, not by configuration:**
 
-- `JIRA_ALLOW_WRITES=false` removes the write tools from the request entirely — the model
-  cannot call what it isn't given.
-- With writes on, the system prompt requires the bot to restate the change and get a "yes"
-  before the first write of a request. The UI also shows every Jira call it made, so a
-  change is never invisible.
+- There are no create/update/transition/comment/worklog tools, so the model cannot ask for
+  one — it can only call what it is given.
+- `JiraClient` refuses any request that is not a `GET` (plus `POST` to the two search
+  endpoints, since search reads but uses POST). The refusal happens before the request is
+  built, so nothing reaches Jira.
+- Tests assert both halves: no write-shaped tool is exposed, and each of create, edit,
+  delete, comment, transition, worklog and reassign raises *and* never reaches the network.
+
+The UI also lists every Jira call behind each answer, so you can see exactly what it read.
 
 ## Setup
 
@@ -81,17 +86,16 @@ curl -s localhost:8000/api/chat \
 ```
 
 Pass the returned `session_id` back on the next call to continue the conversation.
-`GET /api/health` reports Jira connectivity, the model in use and whether writes are on.
+`GET /api/health` reports Jira connectivity and the model in use.
 
 ## Things to ask it
 
 - What's assigned to me and not done?
 - Summarise the current sprint — who's overloaded?
 - Which issues in ABC haven't been updated in two weeks?
-- Show me ABC-42 and its comments.
-- Create a bug in ABC: "checkout 500s on submit", high priority, assign to Priya.
-- Move ABC-42 to In Progress and comment that I've started.
-- Log 3h on ABC-42 for the migration work.
+- What does DFE-9067 actually say? Show me its full description.
+- Show me the comments on ABC-42.
+- Which statuses could ABC-42 move to? (it reports them; it cannot perform the move)
 
 ## Slack setup
 
@@ -120,8 +124,8 @@ How it behaves:
 - Markdown is converted to Slack formatting — tables become bullet lines, since Slack
   cannot render a table.
 
-The write confirmation still applies: it asks before creating, updating, transitioning,
-commenting or logging work — in the thread, where your team can see it.
+The bot is read-only in Slack too: it answers questions about Jira and cannot change
+anything, whoever asks.
 
 ## Configuration
 
@@ -130,7 +134,6 @@ comments. The ones worth knowing:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `JIRA_ALLOW_WRITES` | `true` | `false` = read-only bot |
 | `JIRA_DEFAULT_PROJECT` | — | Assumed when the user doesn't name a project |
 | `CLAUDE_MODEL` | `claude-opus-5` | |
 | `CLAUDE_EFFORT` | `high` | `low`/`medium` are cheaper and faster |
@@ -144,18 +147,20 @@ comments. The ones worth knowing:
 python -m pytest
 ```
 
-60 tests, no network and no API spend: the Jira API is a `httpx.MockTransport`, Claude is a
+99 tests, no network and no API spend: the Jira API is a `httpx.MockTransport`, Claude is a
 stub that replays scripted tool-use responses, and the Slack client is a stub that records
-what would have been posted. They cover ADF conversion, request shaping for every write
-path, error handling, the write guard, the agent loop (parallel tool calls, tool errors,
-runaway loops, history trimming), session expiry and eviction, and the Slack handlers.
+what would have been posted. They cover the read-only guarantee (no write tool is exposed,
+and every write verb is refused before it reaches the network), ADF reading, Jira error
+handling, the agent loop (parallel tool calls, tool errors, runaway loops, history
+trimming), session expiry and eviction, the Slack handlers, and the story generator.
 
 ## Adding a Jira operation
 
-1. Add a method to `JiraClient` returning a trimmed dict.
-2. Add a spec to `TOOL_SPECS` and an entry to `HANDLERS` in `app/tools.py` — put the name in
-   `WRITE_TOOLS` if it changes anything.
-3. Add a test. `test_every_spec_has_a_handler_and_vice_versa` will fail if you miss step 2.
+1. Add a **read** method to `JiraClient` returning a trimmed dict. A write will not work:
+   `_request` refuses anything that is not a GET or a search POST.
+2. Add a spec to `TOOL_SPECS` and an entry to `HANDLERS` in `app/tools.py`.
+3. Add a test. `test_every_spec_has_a_handler_and_vice_versa` fails if you miss step 2, and
+   `test_no_tool_can_change_jira` fails if the new tool is named like a write.
 
 ## Notes and limits
 
@@ -166,7 +171,6 @@ runaway loops, history trimming), session expiry and eviction, and the Slack han
   them; for multiple server processes you'd move them to Redis.
 - **No authentication on the web UI.** Everyone who can reach it acts as your Jira service
   account. Put it behind your SSO/proxy before exposing it beyond localhost. The same holds
-  in Slack: anyone who can message the bot gets that account's Jira access, so consider
-  `JIRA_ALLOW_WRITES=false` for a bot in a wide channel.
+  in Slack: anyone who can message the bot can read whatever that account can read.
 - Search results are capped at 100 issues per call so a broad query can't exhaust the
   context window; the bot pages with `next_page_token` when it needs more.

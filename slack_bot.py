@@ -152,10 +152,9 @@ async def main() -> int:
         return 1
 
     logger.info(
-        "Starting Slack bot — Jira %s as %s%s",
+        "Starting Slack bot (read-only) — Jira %s as %s",
         settings.jira_base_url,
         state["jira_user"].get("display_name"),
-        "" if settings.allow_writes else " (read-only)",
     )
     handler = AsyncSocketModeHandler(build_app(), settings.slack_app_token)
     try:

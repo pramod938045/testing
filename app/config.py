@@ -48,7 +48,6 @@ class Settings:
     slack_app_token: str = field(default_factory=lambda: os.getenv("SLACK_APP_TOKEN", ""))
 
     # --- Behaviour ---
-    allow_writes: bool = field(default_factory=lambda: _bool("JIRA_ALLOW_WRITES", True))
     max_tool_iterations: int = field(default_factory=lambda: _int("MAX_TOOL_ITERATIONS", 12))
     max_search_results: int = field(default_factory=lambda: _int("MAX_SEARCH_RESULTS", 50))
     history_turns: int = field(default_factory=lambda: _int("HISTORY_TURNS", 20))

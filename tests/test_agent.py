@@ -133,16 +133,18 @@ async def test_failed_tool_is_marked_as_an_error_for_claude(make_client):
     await jira.aclose()
 
 
-async def test_write_tools_are_not_offered_in_read_only_mode(make_client):
-    agent, jira, _ = build_agent(
-        make_client, [FakeMessage([TextBlock("I can only read Jira.")])], allow_writes=False
-    )
+async def test_no_write_tools_are_ever_offered(make_client):
+    agent, jira, _ = build_agent(make_client, [FakeMessage([TextBlock("I can only read Jira.")])])
     await agent.chat("close ABC-1")
 
-    offered = {tool["name"] for tool in agent.client.messages.calls[0]["tools"]}
-    assert "transition_issue" not in offered
-    assert "search_issues" in offered
-    assert "READ-ONLY" in agent.client.messages.calls[0]["system"][1]["text"]
+    call = agent.client.messages.calls[0]
+    offered = {tool["name"] for tool in call["tools"]}
+    for forbidden in ("transition_issue", "create_issue", "update_issue", "add_comment", "log_work"):
+        assert forbidden not in offered
+    assert "search_issues" in offered and "get_issue" in offered
+
+    assert "READ-ONLY" in call["system"][1]["text"]
+    assert "You can only read Jira" in call["system"][0]["text"]
     await jira.aclose()
 
 

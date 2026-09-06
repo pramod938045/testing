@@ -1,9 +1,12 @@
 """Async Jira Cloud REST client (API v3 + Agile API v1.0).
 
-Only the surface the chatbot needs is implemented. Every method returns plain
-dicts/lists that are cheap to serialise into a tool result for Claude — issues
-are trimmed to the fields that matter so a 50-issue search doesn't blow up the
-context window.
+READ-ONLY BY DESIGN. `_request` refuses anything that could change Jira: only
+GET, and POST to the search endpoints (search reads but uses POST), are
+allowed. There are no create/update/transition/comment/worklog methods, and a
+future edit that tried to add one would raise instead of writing.
+
+Responses are trimmed to the fields that matter so a 50-issue search doesn't
+blow up the context window.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ from typing import Any, Iterable
 
 import httpx
 
-from .adf import render, text_to_adf
+from .adf import render
 
 DEFAULT_FIELDS = [
     "summary",
@@ -31,6 +34,9 @@ DEFAULT_FIELDS = [
 ]
 
 DETAIL_FIELDS = DEFAULT_FIELDS + ["description", "subtasks", "issuelinks", "timetracking", "resolution"]
+
+# The only non-GET calls allowed: searching reads data but uses POST.
+SEARCH_PATHS = ("/rest/api/3/search/jql", "/rest/api/3/search")
 
 
 class JiraError(RuntimeError):
@@ -77,7 +83,21 @@ class JiraClient:
 
     # ------------------------------------------------------------------ HTTP
 
+    @staticmethod
+    def _refuse_writes(method: str, path: str) -> None:
+        """Block anything that could modify Jira, before a request is sent."""
+        method = method.upper()
+        if method == "GET":
+            return
+        if method == "POST" and path in SEARCH_PATHS:
+            return
+        raise JiraError(
+            f"Blocked: {method} {path} would modify Jira. This assistant is read-only "
+            "and never creates, edits or deletes anything."
+        )
+
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        self._refuse_writes(method, path)
         try:
             response = await self._client.request(method, path, **kwargs)
         except httpx.RequestError as exc:  # DNS failure, timeout, TLS, ...
@@ -255,19 +275,15 @@ class JiraClient:
             ]
         }
 
-    async def list_issue_types(self, project_key: str) -> dict[str, Any]:
-        payload = await self._request(
-            "GET",
-            "/rest/api/3/issue/createmeta",
-            params={"projectKeys": project_key, "expand": "projects.issuetypes"},
-        )
-        projects = payload.get("projects") or []
-        types = projects[0].get("issuetypes", []) if projects else []
+    async def list_transitions(self, key: str) -> dict[str, Any]:
+        """Which statuses an issue *could* move to. Reading only — the
+        assistant cannot perform a transition."""
+        payload = await self._request("GET", f"/rest/api/3/issue/{key}/transitions")
         return {
-            "project": project_key,
-            "issue_types": [
-                {"name": item.get("name"), "id": item.get("id"), "subtask": item.get("subtask")}
-                for item in types
+            "key": key,
+            "transitions": [
+                {"id": item.get("id"), "name": item.get("name"), "to": (item.get("to") or {}).get("name")}
+                for item in payload.get("transitions", [])
             ],
         }
 
@@ -334,122 +350,4 @@ class JiraClient:
             "by_status": by_status,
             "by_assignee": by_assignee,
             "issues": issues,
-        }
-
-    # ----------------------------------------------------------------- write
-
-    async def create_issue(
-        self,
-        project_key: str,
-        summary: str,
-        issue_type: str = "Task",
-        description: str | None = None,
-        assignee_account_id: str | None = None,
-        priority: str | None = None,
-        labels: list[str] | None = None,
-        parent_key: str | None = None,
-        due_date: str | None = None,
-    ) -> dict[str, Any]:
-        fields: dict[str, Any] = {
-            "project": {"key": project_key},
-            "summary": summary,
-            "issuetype": {"name": issue_type},
-        }
-        if description:
-            fields["description"] = text_to_adf(description)
-        if assignee_account_id:
-            fields["assignee"] = {"accountId": assignee_account_id}
-        if priority:
-            fields["priority"] = {"name": priority}
-        if labels:
-            fields["labels"] = labels
-        if parent_key:
-            fields["parent"] = {"key": parent_key}
-        if due_date:
-            fields["duedate"] = due_date
-
-        created = await self._request("POST", "/rest/api/3/issue", json={"fields": fields})
-        key = created.get("key")
-        return {"created": True, "key": key, "url": self.issue_url(key)}
-
-    async def update_issue(
-        self,
-        key: str,
-        summary: str | None = None,
-        description: str | None = None,
-        assignee_account_id: str | None = None,
-        priority: str | None = None,
-        labels: list[str] | None = None,
-        due_date: str | None = None,
-    ) -> dict[str, Any]:
-        fields: dict[str, Any] = {}
-        if summary is not None:
-            fields["summary"] = summary
-        if description is not None:
-            fields["description"] = text_to_adf(description)
-        if assignee_account_id is not None:
-            fields["assignee"] = {"accountId": assignee_account_id} if assignee_account_id else None
-        if priority is not None:
-            fields["priority"] = {"name": priority}
-        if labels is not None:
-            fields["labels"] = labels
-        if due_date is not None:
-            fields["duedate"] = due_date
-        if not fields:
-            raise JiraError("update_issue called with no fields to change.")
-
-        await self._request("PUT", f"/rest/api/3/issue/{key}", json={"fields": fields})
-        return {"updated": True, "key": key, "changed": sorted(fields), "url": self.issue_url(key)}
-
-    async def list_transitions(self, key: str) -> dict[str, Any]:
-        payload = await self._request("GET", f"/rest/api/3/issue/{key}/transitions")
-        return {
-            "key": key,
-            "transitions": [
-                {"id": item.get("id"), "name": item.get("name"), "to": (item.get("to") or {}).get("name")}
-                for item in payload.get("transitions", [])
-            ],
-        }
-
-    async def transition_issue(self, key: str, to_status: str) -> dict[str, Any]:
-        available = (await self.list_transitions(key))["transitions"]
-        wanted = to_status.strip().lower()
-        match = next(
-            (
-                item
-                for item in available
-                if (item["name"] or "").lower() == wanted or (item["to"] or "").lower() == wanted
-            ),
-            None,
-        )
-        if match is None:
-            names = ", ".join(f"{item['name']} -> {item['to']}" for item in available) or "none"
-            raise JiraError(f"No transition to '{to_status}' from the current status of {key}. Available: {names}")
-
-        await self._request(
-            "POST", f"/rest/api/3/issue/{key}/transitions", json={"transition": {"id": match["id"]}}
-        )
-        return {"transitioned": True, "key": key, "to": match["to"] or match["name"], "url": self.issue_url(key)}
-
-    async def add_comment(self, key: str, body: str) -> dict[str, Any]:
-        payload = await self._request(
-            "POST", f"/rest/api/3/issue/{key}/comment", json={"body": text_to_adf(body)}
-        )
-        return {"commented": True, "key": key, "comment_id": payload.get("id"), "url": self.issue_url(key)}
-
-    async def log_work(
-        self, key: str, time_spent: str, comment: str | None = None, started: str | None = None
-    ) -> dict[str, Any]:
-        body: dict[str, Any] = {"timeSpent": time_spent}
-        if comment:
-            body["comment"] = text_to_adf(comment)
-        if started:
-            body["started"] = started
-        payload = await self._request("POST", f"/rest/api/3/issue/{key}/worklog", json=body)
-        return {
-            "logged": True,
-            "key": key,
-            "worklog_id": payload.get("id"),
-            "time_spent": payload.get("timeSpent", time_spent),
-            "url": self.issue_url(key),
         }
