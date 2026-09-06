@@ -197,7 +197,18 @@ a Jira client or calls the AI.
 ## Configuration
 
 Every setting is an environment variable; see `.env.example` for the full list with
-comments. The ones worth knowing:
+comments. Run `python -m app.setup` to write `.env` — it asks for the credentials
+the deployment in your URL actually uses, and accepts `-` to clear a value.
+
+**`.env` wins over variables already set in the shell.** python-dotenv's default
+is the other way round, which means a leftover `set JIRA_BASE_URL=…` silently
+beats the file you just saved — the settings look applied and do nothing. When
+`.env` sets `JIRA_BASE_URL` it owns the whole Jira block, so a `JIRA_EMAIL` it
+omits is cleared rather than inherited from the shell; that is what lets a Cloud
+configuration be switched to Data Center. `python -m app.jira_test` prints which
+source each value came from.
+
+The ones worth knowing:
 
 | Variable | Default | Notes |
 | --- | --- | --- |

@@ -82,9 +82,9 @@ async def check_anthropic() -> dict[str, Any]:
     except anthropic.AuthenticationError:
         result["anthropic"] = "rejected (401)"
         result["fix"] = (
-            "Anthropic rejected the key. Either it is wrong or revoked, or a stale "
-            "ANTHROPIC_API_KEY in the shell is overriding your .env file — see "
-            "shell_overrides_dotenv above. Open a new terminal and restart the server."
+            "Anthropic rejected the key: it is wrong, revoked, or not the one you "
+            f"meant — the key in use came from {report['source']}. "
+            "Set it with `python -m app.setup` and restart the server."
         )
     except anthropic.PermissionDeniedError:
         result["anthropic"] = "forbidden (403)"
@@ -102,9 +102,9 @@ async def check_anthropic() -> dict[str, Any]:
     finally:
         await client.close()
 
-    if result.get("anthropic") != "ok" and report["shell_overrides_dotenv"]:
+    if result.get("anthropic") != "ok" and report["source"] == "the shell environment":
         result["warning"] = (
-            "A shell ANTHROPIC_API_KEY is overriding the one in your .env file. "
-            "Close the terminal, open a new one, and start the server again."
+            "The key in use came from a shell variable, not your .env file. Run "
+            "`python -m app.setup` to put it in .env, which now takes precedence."
         )
     return result

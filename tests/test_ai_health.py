@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 import app.ai_health as ai_health
+import app.config
 from app.config import api_key_report
 
 REAL_LOOKING = "sk-ant-api03-" + "x" * 90
@@ -19,6 +20,11 @@ def set_key(monkeypatch, value, in_dotenv=None, dotenv_path="/repo/.env"):
         "app.config.dotenv_values",
         lambda path: {"ANTHROPIC_API_KEY": in_dotenv} if in_dotenv else {},
     )
+    # Since .env now wins, "in_dotenv" means the file supplied the live value.
+    monkeypatch.setitem(
+        app.config.ENV_FILE, "names", ["ANTHROPIC_API_KEY"] if in_dotenv else []
+    )
+    monkeypatch.setitem(app.config.ENV_FILE, "shadowed", [])
 
 
 def fake_client(error=None, auth_error=None, calls=None):
@@ -70,17 +76,19 @@ def test_report_never_contains_the_key(monkeypatch):
     assert report["prefix_looks_right"] is True
 
 
-def test_report_spots_a_shell_variable_overriding_the_dotenv_file(monkeypatch):
-    set_key(monkeypatch, "sk-ant-from-the-shell-window", in_dotenv=REAL_LOOKING)
+def test_the_report_says_the_key_came_from_the_dotenv_file(monkeypatch):
+    set_key(monkeypatch, REAL_LOOKING, in_dotenv=REAL_LOOKING)
     report = api_key_report()
 
-    assert report["shell_overrides_dotenv"] is True
+    assert report["source"] == "the .env file"
     assert report["key_in_dotenv"] is True
 
 
-def test_report_is_quiet_when_the_dotenv_value_is_the_one_in_use(monkeypatch):
-    set_key(monkeypatch, REAL_LOOKING, in_dotenv=REAL_LOOKING)
-    assert api_key_report()["shell_overrides_dotenv"] is False
+def test_the_report_says_when_the_key_came_from_the_shell(monkeypatch):
+    """No .env entry, so the value can only have come from the environment."""
+    set_key(monkeypatch, REAL_LOOKING)
+
+    assert api_key_report()["source"] == "the shell environment"
 
 
 # --- the check itself ------------------------------------------------------
@@ -127,9 +135,9 @@ async def test_malformed_key_is_caught_before_a_request(monkeypatch):
     assert "sk-ant-" in result["fix"]
 
 
-async def test_rejected_key_explains_the_shell_override(monkeypatch):
-    """The exact failure the user hit: a stale shell key beating .env."""
-    set_key(monkeypatch, REAL_LOOKING, in_dotenv="sk-ant-api03-" + "z" * 90)
+async def test_a_rejected_key_names_where_it_came_from(monkeypatch):
+    """A rejected key is only actionable if you know which key was tried."""
+    set_key(monkeypatch, REAL_LOOKING)
     monkeypatch.setattr(
         anthropic,
         "AsyncAnthropic",
@@ -138,8 +146,21 @@ async def test_rejected_key_explains_the_shell_override(monkeypatch):
     result = await ai_health.check_anthropic()
 
     assert result["anthropic"] == "rejected (401)"
-    assert "shell_overrides_dotenv" in result["fix"]
-    assert "overriding" in result["warning"] and "open a new one" in result["warning"]
+    assert "the shell environment" in result["fix"]
+    assert "app.setup" in result["warning"]
+
+
+async def test_a_rejected_key_from_the_file_does_not_blame_the_shell(monkeypatch):
+    set_key(monkeypatch, REAL_LOOKING, in_dotenv=REAL_LOOKING)
+    monkeypatch.setattr(
+        anthropic,
+        "AsyncAnthropic",
+        fake_client(auth_error=api_error(anthropic.AuthenticationError, 401)),
+    )
+    result = await ai_health.check_anthropic()
+
+    assert "the .env file" in result["fix"]
+    assert "warning" not in result
 
 
 async def test_a_valid_key_with_no_credit_says_so(monkeypatch):

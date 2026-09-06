@@ -21,7 +21,7 @@ import sys
 
 import httpx
 
-from .config import ConfigError, settings
+from .config import ENV_FILE, ConfigError, settings, source_of
 from .jira_client import JiraClient
 
 DEFAULT_KEY = "UPAMCORE-30728"
@@ -89,11 +89,16 @@ async def main(argv: list[str] | None = None) -> int:
     token_length = len(settings.jira_api_token)
 
     print("\nJira connection test")
-    print(f"  1. Base URL     : {jira.base_url}")
+    print(f"  0. Settings file: {ENV_FILE['path'] or '(no .env found — using shell variables)'}")
+    print(f"  1. Base URL     : {jira.base_url}   <- {source_of('JIRA_BASE_URL')}")
     print(f"  2. Auth scheme  : {scheme}  (token: set, {token_length} characters — never shown)")
+    print(f"                    token from {source_of('JIRA_API_TOKEN')}")
     print(f"  3. Deployment   : {jira.deployment}   API version: {jira.api}")
     print(f"     Email        : {settings.jira_email or '(unused on Data Center)'}")
     print(f"  4. Issue key    : {key}")
+    if ENV_FILE["shadowed"] or ENV_FILE["cleared"]:
+        changed = ", ".join(ENV_FILE["shadowed"] + ENV_FILE["cleared"])
+        print(f"\n  Note: .env took precedence over shell variables for: {changed}")
 
     if jira.deployment == "server" and scheme != "Bearer":
         print("\n  WRONG AUTH: Data Center needs a Bearer personal access token.")

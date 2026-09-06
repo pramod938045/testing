@@ -7,17 +7,69 @@ from dataclasses import dataclass, field
 
 from dotenv import dotenv_values, find_dotenv, load_dotenv
 
-DOTENV_PATH = find_dotenv()
-load_dotenv()
+# The .env file owns the Jira block as a whole. A key it deliberately leaves
+# out — JIRA_EMAIL on Data Center, say — must not be resurrected from a stale
+# shell variable, so those are cleared alongside the ones it does set.
+JIRA_VARS = (
+    "JIRA_BASE_URL",
+    "JIRA_EMAIL",
+    "JIRA_API_TOKEN",
+    "JIRA_DEPLOYMENT",
+    "JIRA_DEFAULT_PROJECT",
+    "JIRA_TIMEOUT_SECONDS",
+)
+
+
+def load_env_file(path: str | None = None) -> dict:
+    """Load .env so that the file beats variables already in the shell.
+
+    python-dotenv defaults to `override=False`, which means a leftover
+    `set JIRA_BASE_URL=...` silently wins over the file that `app.setup`
+    just wrote — the settings look saved and have no effect. For a local
+    tool the file the user edited is what they meant, so it wins here.
+
+    Returns what happened, for diagnostics. Values are never included.
+    """
+    if path is None:
+        path = find_dotenv(usecwd=True) or find_dotenv()
+    file_values = {
+        name: value for name, value in (dotenv_values(path) if path else {}).items()
+        if value is not None
+    }
+
+    # Names the shell had set to something else; the file now wins.
+    shadowed = sorted(
+        name for name, value in file_values.items()
+        if os.getenv(name) is not None and os.getenv(name) != value
+    )
+    if path:
+        load_dotenv(path, override=True)
+
+    cleared = []
+    if "JIRA_BASE_URL" in file_values:
+        for name in JIRA_VARS:
+            if name not in file_values and name in os.environ:
+                del os.environ[name]
+                cleared.append(name)
+
+    return {"path": path or "", "names": sorted(file_values), "shadowed": shadowed, "cleared": cleared}
+
+
+ENV_FILE = load_env_file()
+DOTENV_PATH = ENV_FILE["path"]
+
+
+def source_of(name: str) -> str:
+    """Where a setting's value came from — for messages, never the value."""
+    if name in ENV_FILE["names"]:
+        return "the .env file" + (" (overriding the shell)" if name in ENV_FILE["shadowed"] else "")
+    if name in ENV_FILE["cleared"]:
+        return "cleared — not in .env"
+    return "the shell environment" if os.getenv(name) else "not set"
 
 
 def api_key_report() -> dict:
-    """Safe facts about ANTHROPIC_API_KEY — never the key itself.
-
-    `load_dotenv()` does not override variables already in the environment, so
-    a stale `set ANTHROPIC_API_KEY=...` in the shell silently beats the .env
-    file. `shell_overrides_dotenv` is how you spot that.
-    """
+    """Safe facts about ANTHROPIC_API_KEY — never the key itself."""
     in_file = ((dotenv_values(DOTENV_PATH) if DOTENV_PATH else {}).get("ANTHROPIC_API_KEY") or "").strip()
     live = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
@@ -28,7 +80,8 @@ def api_key_report() -> dict:
         "key_length": len(live),
         "prefix_looks_right": live.startswith("sk-ant-"),
         "looks_like_placeholder": "your-key" in live or "paste" in live.lower(),
-        "shell_overrides_dotenv": bool(in_file and live and in_file != live),
+        "shell_overrides_dotenv": False,  # the file now wins; kept for the health payload
+        "source": source_of("ANTHROPIC_API_KEY"),
     }
 
 
