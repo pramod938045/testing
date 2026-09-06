@@ -26,6 +26,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+# Bump when a user-visible feature lands, so /api/version can prove what is running.
+FEATURES = {"ticket_lookup", "read_only", "anthropic_health", "demo_chat", "no_cache_pages"}
 ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 
 state: dict[str, Any] = {"jira": None, "jira_user": {}}
@@ -88,15 +90,31 @@ def _get_agent(session_id: str | None, demo: bool = False) -> tuple[str, Any]:
     return key, (demo_sessions if demo else sessions).get(key)
 
 
+# Browsers happily serve a cached copy of these pages after an update, which
+# looks exactly like "the new feature isn't there".
+NO_CACHE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+
+
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE)
 
 
 @app.get("/lookup")
 async def lookup_page() -> FileResponse:
     """Ticket lookup — reads Jira directly, needs no AI key."""
-    return FileResponse(STATIC_DIR / "lookup.html")
+    return FileResponse(STATIC_DIR / "lookup.html", headers=NO_CACHE)
+
+
+@app.get("/api/version")
+async def version() -> dict[str, Any]:
+    """What code is actually running — so a stale page can be spotted."""
+    return {
+        "features": sorted(FEATURES),
+        "demo_chat": "demo_chat" in FEATURES,
+        "hint": "If a feature you expect is missing here, the server is running old code: "
+        "stop it, `git pull`, and start it again.",
+    }
 
 
 @app.get("/api/issue/{key}")

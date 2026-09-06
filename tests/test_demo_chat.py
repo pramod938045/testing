@@ -123,3 +123,19 @@ def test_the_page_switches_to_demo_from_the_url():
     assert "demo: demoMode" in page, "the flag must be sent to the server"
     assert "demoBar" in page, "demo mode must be visibly signposted"
     assert "Try demo mode instead" in page, "a key error should offer demo mode"
+
+
+def test_pages_are_sent_with_no_cache_headers(client):
+    """A cached page after an update looks exactly like a missing feature."""
+    for path in ("/", "/lookup"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "no-store" in response.headers.get("cache-control", "")
+
+
+def test_version_endpoint_reports_the_running_features(client):
+    data = client.get("/api/version").json()
+
+    assert data["demo_chat"] is True
+    assert "ticket_lookup" in data["features"]
+    assert "old code" in data["hint"]
