@@ -1,0 +1,277 @@
+# Jira Chatbot
+
+A read-only chatbot for Jira Cloud. Ask questions in plain English — "what's assigned to me
+and not done?", "summarise the current sprint", "what does DFE-9067 say?" — and it works out
+which Jira API calls to make, runs them, and answers from the real data.
+
+It cannot change anything in Jira. That is enforced in code (see below), not by a setting.
+
+Claude does the language understanding via tool-calling; the Jira REST API does the work.
+Three front ends — a browser chat UI, a Slack bot, and a terminal client — share one agent.
+
+```
+browser (app/main.py)  ─┐
+Slack   (slack_bot.py) ─┼─> JiraChatAgent (app/agent.py)   tool-use loop with Claude
+CLI     (cli.py)       ─┘      -> tools (app/tools.py)     9 read-only operations
+                                  -> JiraClient (app/jira_client.py)  REST v3 + Agile v1.0
+```
+
+## What it can do
+
+**It reads Jira; it never writes.** JQL search, issue detail (including the full
+description), comments, projects, users, boards, sprints, and `sprint_report` — every issue
+in a sprint plus counts by status and assignee, which the standup/blocker/status summaries
+are built from.
+
+**Read-only is enforced in code, not by configuration:**
+
+- There are no create/update/transition/comment/worklog tools, so the model cannot ask for
+  one — it can only call what it is given.
+- `JiraClient` refuses any request that is not a `GET` (plus `POST` to the two search
+  endpoints, since search reads but uses POST). The refusal happens before the request is
+  built, so nothing reaches Jira.
+- Tests assert both halves: no write-shaped tool is exposed, and each of create, edit,
+  delete, comment, transition, worklog and reassign raises *and* never reaches the network.
+
+The UI also lists every Jira call behind each answer, so you can see exactly what it read.
+
+## Jira Cloud and Jira Data Center
+
+Both are supported, and the deployment is detected from `JIRA_BASE_URL`
+(`*.atlassian.net` is Cloud; anything else is Data Center / Server). Override
+with `JIRA_DEPLOYMENT=cloud|server` if the detection is wrong.
+
+| | Jira Cloud | Jira Data Center / Server |
+| --- | --- | --- |
+| REST API | v3 | v2 |
+| Auth | Basic: `JIRA_EMAIL` + API token | `Bearer`: Personal Access Token, no email |
+| Token from | id.atlassian.com → Security → API tokens | your Jira → Profile → Personal Access Tokens |
+| Rich text | ADF | wiki markup |
+
+The tokens are not interchangeable: a Cloud API token is rejected by Data
+Center, which is what a `403` from a self-hosted site usually means. One
+running instance talks to one site — point `JIRA_BASE_URL` at whichever holds
+the issues you want.
+
+## Setup
+
+Requires Python 3.11+.
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env      # then fill it in
+```
+
+You need two credentials:
+
+| Variable | Where to get it |
+| --- | --- |
+| `JIRA_API_TOKEN` | https://id.atlassian.com/manage-profile/security/api-tokens |
+| `ANTHROPIC_API_KEY` | https://console.anthropic.com/settings/keys |
+
+The bot acts as the Atlassian account in `JIRA_EMAIL` and inherits exactly that account's
+permissions — it cannot see or change anything that user couldn't. For a shared bot, use a
+dedicated Atlassian account rather than a person's.
+
+## Run it
+
+Web UI at http://localhost:8000:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+Slack (see setup below):
+
+```bash
+python slack_bot.py
+```
+
+Terminal:
+
+```bash
+python cli.py                                      # interactive
+python cli.py "what's assigned to me this sprint?" # one-shot
+```
+
+As an API:
+
+```bash
+curl -s localhost:8000/api/chat \
+  -H 'content-type: application/json' \
+  -d '{"message": "show me open bugs in ABC"}'
+# -> {"session_id": "...", "reply": "...", "tool_calls": [...]}
+```
+
+Pass the returned `session_id` back on the next call to continue the conversation.
+`GET /api/health` reports Jira connectivity and the model in use.
+
+## Things to ask it
+
+- What's assigned to me and not done?
+- Summarise the current sprint — who's overloaded?
+- Which issues in ABC haven't been updated in two weeks?
+- What does DFE-9067 actually say? Show me its full description.
+- Show me the comments on ABC-42.
+- Which statuses could ABC-42 move to? (it reports them; it cannot perform the move)
+
+## Slack setup
+
+The bot runs over **Socket Mode**, so it needs no public URL, no ngrok and no inbound
+firewall rules — it dials out to Slack.
+
+At https://api.slack.com/apps → **Create New App** → *From scratch*:
+
+1. **Socket Mode** → enable it. That generates an **App-Level Token** with
+   `connections:write` — this is `SLACK_APP_TOKEN` (`xapp-…`).
+2. **OAuth & Permissions** → add these bot scopes:
+   `app_mentions:read`, `chat:write`, `im:read`, `im:write`, `im:history`.
+3. **Event Subscriptions** → enable, and subscribe to bot events:
+   `app_mention` and `message.im`.
+4. **Install to Workspace** → copy the **Bot User OAuth Token** into `SLACK_BOT_TOKEN`
+   (`xoxb-…`).
+5. `python slack_bot.py`, then invite the bot to a channel: `/invite @yourbot`.
+
+How it behaves:
+
+- **In a channel** — `@yourbot what's blocked in ABC?` It replies in a thread, and that
+  thread is one conversation, so follow-ups keep context.
+- **In a DM** — just type; no mention needed.
+- **`@yourbot reset`** (or "new chat") starts the conversation over.
+- Every reply carries a small context line listing the Jira calls it made.
+- Markdown is converted to Slack formatting — tables become bullet lines, since Slack
+  cannot render a table.
+
+The bot is read-only in Slack too: it answers questions about Jira and cannot change
+anything, whoever asks.
+
+## Three chat modes
+
+| URL | What answers | Needs |
+| --- | --- | --- |
+| `/` | Claude, choosing Jira calls itself | Anthropic key with credit |
+| `/?jira` | **Real Jira, no AI** — type an issue key | Jira only |
+| `/?demo` | Built-in sample issues | nothing |
+
+`/?jira` is the fallback when the AI is unavailable, and the default when no
+`ANTHROPIC_API_KEY` is set. It answers from live Jira with no AI at all:
+
+| Ask | What it does | Jira call |
+| --- | --- | --- |
+| `UPAMCORE-30728` | Full issue: summary, description, status, assignee, type, parent, links, subtasks | `GET /issue/{key}` |
+| *what's the status?* | Answers from the issue already fetched | none |
+| *provide the CR ticket for this story* | Looks up parent, links and subtasks, and keeps the ones Jira **types** as a Change Request | `POST /search` — `key in (…)` |
+| *what stories are under this epic?* | Real child issues | `POST /search` — `"Epic Link" = K`, else `parent = K` |
+| *what's assigned to me and not done?* | Translates to JQL | `POST /search` |
+| *show bugs updated in the last 7 days* | Translates to JQL | `POST /search` |
+| *what is blocked right now?* | Tries each meaning of "blocked" | `POST /search` |
+| *summarise the current sprint* | Real active sprint, grouped by status and assignee | Agile `board` → `sprint` → `sprint/{id}/issue` |
+| `jql: project = DFE AND …` | Runs your JQL verbatim | `POST /search` |
+
+Two things make this work without an AI. **Scope is decided before content**:
+a question naming its own scope ("assigned to me", "blocked", "bugs in the last
+7 days") is routed to a search *before* the single-issue follow-up rules, which
+match on bare substrings and would otherwise answer "what is blocked right
+now?" with the links of whichever issue was open. And **JQL that varies between
+sites is tried in order**: `statusCategory` falls back to `resolution`, `"Epic
+Link"` to `parent`, and "blocked" walks through link type, status, labels and
+flag until Jira accepts one — so the same translator works on Cloud and Data
+Center without being told which is which. Every reply shows the JQL used.
+
+A CR is identified by the linked issue's **issue type**, never by its key
+prefix or the link name, so an unrelated neighbour is not reported as a change
+request. If several related issues are Change Requests, all are listed with
+their relationships; if none is, it says so and lists what it checked.
+
+A missing issue says why; an authentication failure shows Jira's own error.
+Nothing is hardcoded and nothing is written.
+
+The response says which mode answered, and the page shows a banner for each, so
+it can never be unclear whether data is real.
+
+## Demo mode
+
+Every story-generator command takes `--demo`, which uses built-in sample data
+instead of Jira and returns sample Story suggestions instead of calling the AI.
+It needs no Jira settings and no `ANTHROPIC_API_KEY`, so the whole flow can be
+shown when there is no API credit, or to someone with no Jira access.
+
+```bash
+python -m storygen.main find deposit --demo      # list the sample issues
+python -m storygen.main show DEMO-1 --demo       # a sample Epic in full
+python -m storygen.main generate DEMO-7 --demo   # sample Story suggestions
+```
+
+The chat UI has the same thing at **http://localhost:8000/?demo** — a working
+conversation with no key at all. A yellow bar marks it, the suggestions become
+demo questions, every reply ends "sample data, not your Jira", and demo
+conversations are stored apart from real ones. When a chat fails for a missing
+key or no credit, the error offers a link to it.
+
+The sample set is one Epic (`DEMO-1`, self-service account closure) and one
+Change Request (`DEMO-7`, first time deposit tracking), written in the same
+shape real issues come back in, so the same rendering code runs either way.
+CLI output is prefixed `[demo]` and the keys all start `DEMO-`, so it cannot be
+mistaken for real data. Demo mode is opt-in everywhere: without the flag the
+commands still need Jira settings, and the endpoint still reports a missing key
+rather than quietly answering from samples. Tests fail if a demo run constructs
+a Jira client or calls the AI.
+
+## Configuration
+
+Every setting is an environment variable; see `.env.example` for the full list with
+comments. Run `python -m app.setup` to write `.env` — it asks for the credentials
+the deployment in your URL actually uses, and accepts `-` to clear a value.
+
+**`.env` wins over variables already set in the shell.** python-dotenv's default
+is the other way round, which means a leftover `set JIRA_BASE_URL=…` silently
+beats the file you just saved — the settings look applied and do nothing. When
+`.env` sets `JIRA_BASE_URL` it owns the whole Jira block, so a `JIRA_EMAIL` it
+omits is cleared rather than inherited from the shell; that is what lets a Cloud
+configuration be switched to Data Center. `python -m app.jira_test` prints which
+source each value came from.
+
+The ones worth knowing:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `JIRA_DEFAULT_PROJECT` | — | Assumed when the user doesn't name a project |
+| `CLAUDE_MODEL` | `claude-opus-5` | |
+| `CLAUDE_EFFORT` | `high` | `low`/`medium` are cheaper and faster |
+| `MAX_TOOL_ITERATIONS` | `12` | Tool rounds per message before giving up |
+| `HISTORY_TURNS` | `20` | Conversation turns kept in context |
+| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | — | Slack bot only |
+
+## Tests
+
+```bash
+python -m pytest
+```
+
+99 tests, no network and no API spend: the Jira API is a `httpx.MockTransport`, Claude is a
+stub that replays scripted tool-use responses, and the Slack client is a stub that records
+what would have been posted. They cover the read-only guarantee (no write tool is exposed,
+and every write verb is refused before it reaches the network), ADF reading, Jira error
+handling, the agent loop (parallel tool calls, tool errors, runaway loops, history
+trimming), session expiry and eviction, the Slack handlers, and the story generator.
+
+## Adding a Jira operation
+
+1. Add a **read** method to `JiraClient` returning a trimmed dict. A write will not work:
+   `_request` refuses anything that is not a GET or a search POST.
+2. Add a spec to `TOOL_SPECS` and an entry to `HANDLERS` in `app/tools.py`.
+3. Add a test. `test_every_spec_has_a_handler_and_vice_versa` fails if you miss step 2, and
+   `test_no_tool_can_change_jira` fails if the new tool is named like a write.
+
+## Notes and limits
+
+- **Jira Cloud only.** It uses REST API v3 (ADF rich text) and the Agile API. Jira Data
+  Center/Server needs API v2, wiki-markup bodies and Bearer PAT auth — `jira_client.py` is
+  where that would change.
+- **Sessions are in memory**, capped at 200 and expiring after 4 hours. A restart clears
+  them; for multiple server processes you'd move them to Redis.
+- **No authentication on the web UI.** Everyone who can reach it acts as your Jira service
+  account. Put it behind your SSO/proxy before exposing it beyond localhost. The same holds
+  in Slack: anyone who can message the bot can read whatever that account can read.
+- Search results are capped at 100 issues per call so a broad query can't exhaust the
+  context window; the bot pages with `next_page_token` when it needs more.

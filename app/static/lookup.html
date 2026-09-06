@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Jira Ticket Lookup</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230052cc%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-size=%2719%27 font-family=%27sans-serif%27 font-weight=%27bold%27 fill=%27white%27 text-anchor=%27middle%27%3EJ%3C/text%3E%3C/svg%3E" />
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f5f7; --panel: #ffffff; --border: #dfe1e6;
+    --text: #172b4d; --muted: #6b778c; --accent: #0052cc;
+    --accent-soft: #e9f2ff; --error: #ae2a19; --ok: #216e4e; --ok-soft: #dcfff1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161a1d; --panel: #1d2125; --border: #2c333a;
+      --text: #dee4ea; --muted: #8c9bab; --accent: #579dff;
+      --accent-soft: #1c2b41; --error: #ff9c8f; --ok: #7ee2b8; --ok-soft: #1c3329;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header a { color: var(--accent); font-size: 13px; text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  header .status { font-size: 12px; color: var(--muted); margin-left: auto; }
+
+  main { max-width: 860px; margin: 0 auto; padding: 24px 20px 60px; }
+
+  form { display: flex; gap: 10px; margin-bottom: 8px; }
+  input[type=text] {
+    flex: 1; font: inherit; font-size: 17px; padding: 12px 14px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    text-transform: uppercase;
+  }
+  input[type=text]::placeholder { text-transform: none; color: var(--muted); }
+  input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    font: inherit; padding: 12px 22px; border: 0; border-radius: 8px;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { font-size: 13px; color: var(--muted); margin: 0 0 22px; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px 22px; margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 15px; margin: 0 0 14px; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--muted); font-weight: 600;
+  }
+  .title { font-size: 21px; font-weight: 600; margin: 0 0 4px; line-height: 1.35; }
+  .keyline { font-size: 13px; margin: 0 0 16px; }
+  .keyline a { color: var(--accent); }
+
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+  .badge {
+    font-size: 12px; padding: 3px 10px; border-radius: 12px;
+    background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  }
+  .badge.done { background: var(--ok-soft); color: var(--ok); }
+
+  dl { display: grid; grid-template-columns: 150px 1fr; gap: 8px 16px; margin: 0; font-size: 14px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; word-break: break-word; }
+
+  .desc { white-space: pre-wrap; word-break: break-word; font-size: 14.5px; }
+  .desc:empty::after { content: "(no description)"; color: var(--muted); }
+
+  ul.rows { list-style: none; margin: 0; padding: 0; }
+  ul.rows li { padding: 9px 0; border-top: 1px solid var(--border); font-size: 14px; }
+  ul.rows li:first-child { border-top: 0; }
+  ul.rows a { color: var(--accent); font-weight: 600; text-decoration: none; }
+  ul.rows a:hover { text-decoration: underline; }
+  .rel { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .st { color: var(--muted); font-size: 12px; }
+
+  .comment { padding: 12px 0; border-top: 1px solid var(--border); }
+  .comment:first-child { border-top: 0; }
+  .comment .who { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .comment .what { white-space: pre-wrap; font-size: 14px; word-break: break-word; }
+
+  .msg { padding: 14px 16px; border-radius: 8px; font-size: 14px; }
+  .msg.err { background: var(--panel); border: 1px solid var(--error); color: var(--error); }
+  .msg.wait { color: var(--muted); }
+  .copy {
+    float: right; font-size: 12px; padding: 4px 10px; background: transparent;
+    border: 1px solid var(--border); color: var(--muted); border-radius: 5px;
+  }
+  .copy:hover { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Jira Ticket Lookup</h1>
+  <a href="/">Chat instead →</a>
+  <span class="status" id="status">connecting…</span>
+</header>
+
+<main>
+  <form id="form">
+    <input id="key" type="text" placeholder="Enter a ticket number, e.g. DFE-9067" autocomplete="off" autofocus />
+    <button id="go" type="submit">Show</button>
+  </form>
+  <p class="hint">Reads straight from Jira — no AI key needed. Nothing is ever changed.</p>
+
+  <div id="out"></div>
+</main>
+
+<script>
+const form = document.getElementById('form');
+const keyInput = document.getElementById('key');
+const goBtn = document.getElementById('go');
+const out = document.getElementById('out');
+const statusEl = document.getElementById('status');
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const date = s => {
+  if (!s) return '';
+  const d = new Date(s);
+  return isNaN(d) ? s : d.toLocaleString(undefined,
+    { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+
+function card(title, inner, extra = '') {
+  return `<div class="card"><h2>${esc(title)}${extra}</h2>${inner}</div>`;
+}
+
+function render(d) {
+  const done = (d.status_category || '').toLowerCase() === 'done';
+  const badges = [
+    `<span class="badge">${esc(d.type)}</span>`,
+    `<span class="badge${done ? ' done' : ''}">${esc(d.status)}</span>`,
+    d.priority ? `<span class="badge">${esc(d.priority)}</span>` : '',
+    d.resolution ? `<span class="badge">${esc(d.resolution)}</span>` : '',
+  ].join('');
+
+  const rows = [
+    ['Assignee', d.assignee], ['Reporter', d.reporter],
+    ['Project', d.project ? `${esc(d.project)} (${esc(d.project_key)})` : ''],
+    ['Created', date(d.created)], ['Updated', date(d.updated)],
+    ['Due', d.due_date], ['Parent', d.parent],
+    ['Labels', (d.labels || []).join(', ')],
+    ['Components', (d.components || []).join(', ')],
+    ['Fix versions', (d.fix_versions || []).join(', ')],
+  ].filter(([, v]) => v)
+   .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${k === 'Project' ? v : esc(v)}</dd>`).join('');
+
+  let html = `<div class="card">
+      <p class="title">${esc(d.summary)}</p>
+      <p class="keyline"><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.key)}</a>
+        — open in Jira</p>
+      <div class="badges">${badges}</div>
+      <dl>${rows}</dl>
+    </div>`;
+
+  html += card('Description',
+    `<div class="desc" id="descBody">${esc(d.description)}</div>`,
+    `<button class="copy" type="button" id="copyDesc">Copy</button>`);
+
+  if ((d.subtasks || []).length) {
+    html += card(`Subtasks (${d.subtasks.length})`, '<ul class="rows">' + d.subtasks.map(s =>
+      `<li><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.key)}</a>
+        ${esc(s.summary)} <span class="st">${esc(s.status)}</span></li>`).join('') + '</ul>');
+  }
+
+  if ((d.links || []).length) {
+    html += card(`Linked issues (${d.links.length})`, '<ul class="rows">' + d.links.map(l =>
+      `<li><span class="rel">${esc(l.relation)}</span><br>
+        <a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.key)}</a>
+        ${esc(l.summary)} <span class="st">${esc(l.status)}</span></li>`).join('') + '</ul>');
+  }
+
+  if ((d.comments || []).length) {
+    html += card(`Comments (${d.comments.length})`, d.comments.map(c =>
+      `<div class="comment"><div class="who">${esc(c.author)} · ${esc(date(c.created))}</div>
+        <div class="what">${esc(c.body)}</div></div>`).join(''));
+  }
+
+  out.innerHTML = html;
+
+  const copy = document.getElementById('copyDesc');
+  if (copy) copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(document.getElementById('descBody').textContent);
+      copy.textContent = 'Copied';
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+    } catch { copy.textContent = 'Select it manually'; }
+  });
+}
+
+async function lookup(key) {
+  key = (key || '').trim().toUpperCase();
+  if (!key) return;
+  goBtn.disabled = true;
+  out.innerHTML = '<div class="msg wait">Reading Jira…</div>';
+  try {
+    const res = await fetch('/api/issue/' + encodeURIComponent(key));
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { detail: `Server error ${res.status}: ${text.slice(0, 200) || res.statusText}` };
+    }
+    if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
+    render(data);
+    history.replaceState(null, '', '/lookup?key=' + encodeURIComponent(key));
+  } catch (err) {
+    out.innerHTML = `<div class="msg err">${esc(err.message)}</div>`;
+  } finally {
+    goBtn.disabled = false;
+  }
+}
+
+form.addEventListener('submit', e => { e.preventDefault(); lookup(keyInput.value); });
+
+fetch('/api/health').then(r => r.json()).then(h => {
+  statusEl.textContent = h.jira === 'ok'
+    ? `connected as ${h.jira_user || '—'} · read-only` : `Jira: ${h.jira}`;
+}).catch(() => { statusEl.textContent = 'server unreachable'; });
+
+const preset = new URLSearchParams(location.search).get('key');
+if (preset) { keyInput.value = preset.toUpperCase(); lookup(preset); }
+</script>
+</body>
+</html>
