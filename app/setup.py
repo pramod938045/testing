@@ -9,15 +9,36 @@ commands are needed.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
+from .jira_client import detect_deployment
+
+CLEAR = "-"
+
 FIELDS = [
-    ("JIRA_BASE_URL", "Your Jira site URL", "https://scientificgames.atlassian.net", False),
+    ("JIRA_BASE_URL", "Your Jira site URL", "https://jira.scigames.at", False),
     ("JIRA_EMAIL", "The Atlassian account email", "", False),
-    ("JIRA_API_TOKEN", "Jira API token (id.atlassian.com -> Security -> API tokens)", "", True),
+    ("JIRA_API_TOKEN", "Jira API token", "", True),
     ("ANTHROPIC_API_KEY", "Anthropic API key — leave blank if you don't have one yet", "", True),
 ]
+
+# What each Jira asks for, once the URL says which one it is.
+LABELS = {
+    "cloud": {
+        "JIRA_EMAIL": "The Atlassian account email (Cloud signs in with email + API token)",
+        "JIRA_API_TOKEN": "Cloud API token, from id.atlassian.com -> Security -> API tokens",
+    },
+    "server": {
+        "JIRA_EMAIL": (
+            f"Email — Data Center does NOT use one. Type {CLEAR} to clear it, "
+            "or press Enter to leave it as-is"
+        ),
+        "JIRA_API_TOKEN": (
+            "Personal Access Token, from your Jira -> avatar -> Profile -> "
+            "Personal Access Tokens. A Cloud API token will not work here"
+        ),
+    },
+}
 
 
 def read_existing(path: Path) -> dict[str, str]:
@@ -47,11 +68,13 @@ def main() -> int:
     print("Press Enter to keep the current value shown in brackets.\n")
 
     values: dict[str, str] = {}
+    deployment = detect_deployment(existing.get("JIRA_BASE_URL", ""))
+
     for name, label, example, secret in FIELDS:
         current = existing.get(name, "")
         shown = mask(current) if secret else (current or "(not set)")
         hint = f"  e.g. {example}" if example and not current else ""
-        print(f"{label}{hint}")
+        print(f"{LABELS.get(deployment, {}).get(name, label)}{hint}")
         try:
             entered = input(f"  {name} [{shown}]: ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -60,13 +83,26 @@ def main() -> int:
 
         # Strip quotes people paste along with the value.
         entered = entered.strip('"').strip("'").strip()
-        values[name] = entered or current
+        values[name] = "" if entered == CLEAR else (entered or current)
+
+        if name == "JIRA_BASE_URL" and values[name]:
+            values[name] = values[name].rstrip("/")
+            deployment = detect_deployment(values[name])
+            print(f"  -> {deployment}: REST API v{'3' if deployment == 'cloud' else '2'}, "
+                  f"{'Basic email + API token' if deployment == 'cloud' else 'Bearer personal access token'}")
         print()
 
-    missing = [n for n in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN") if not values.get(n)]
+    required = ["JIRA_BASE_URL", "JIRA_API_TOKEN"]
+    if deployment == "cloud":
+        # Only Cloud signs in as an email address; a Data Center PAT stands alone.
+        required.append("JIRA_EMAIL")
+    missing = [name for name in required if not values.get(name)]
     if missing:
-        print("Jira needs all three of: " + ", ".join(missing) + ". Nothing was written.")
+        print(f"{deployment} Jira needs: " + ", ".join(missing) + ". Nothing was written.")
         return 1
+
+    if deployment == "server" and values.get("JIRA_EMAIL"):
+        print("Note: JIRA_EMAIL is ignored on Data Center — the token authenticates alone.\n")
 
     lines = [
         "# Written by `python -m app.setup`. Keep this file private.",
@@ -74,7 +110,7 @@ def main() -> int:
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    print(f"Saved {path}")
+    print(f"Saved {path}  ({deployment} Jira, REST v{'3' if deployment == 'cloud' else '2'})")
     print("These settings now load automatically — no more `set` commands.\n")
 
     if not values.get("ANTHROPIC_API_KEY"):
@@ -82,7 +118,7 @@ def main() -> int:
         print("Ticket lookup and the storygen commands work without it.")
         print("Add the key later by running this again.\n")
 
-    print("Next:  python -m app.check")
+    print("Next:  python -m app.jira_test ISSUE-KEY      (checks the Jira connection)")
     return 0
 
 
