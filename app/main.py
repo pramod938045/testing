@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .agent import JiraChatAgent
+from .ai_health import check_anthropic
 from .config import ConfigError, settings
 from .jira_client import JiraClient, JiraError
 from .sessions import SessionStore
@@ -110,6 +111,12 @@ async def get_issue(key: str) -> dict[str, Any]:
     except JiraError as exc:
         status = 404 if exc.status_code == 404 else 502
         raise HTTPException(status_code=status, detail=exc.message)
+
+
+@app.get("/api/health/anthropic")
+async def anthropic_health() -> dict[str, Any]:
+    """Is the Anthropic connection working? Never reveals the key itself."""
+    return await check_anthropic()
 
 
 @app.get("/api/health")

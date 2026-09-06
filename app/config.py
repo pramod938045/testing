@@ -5,9 +5,31 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, find_dotenv, load_dotenv
 
+DOTENV_PATH = find_dotenv()
 load_dotenv()
+
+
+def api_key_report() -> dict:
+    """Safe facts about ANTHROPIC_API_KEY — never the key itself.
+
+    `load_dotenv()` does not override variables already in the environment, so
+    a stale `set ANTHROPIC_API_KEY=...` in the shell silently beats the .env
+    file. `shell_overrides_dotenv` is how you spot that.
+    """
+    in_file = ((dotenv_values(DOTENV_PATH) if DOTENV_PATH else {}).get("ANTHROPIC_API_KEY") or "").strip()
+    live = os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+    return {
+        "dotenv_file": DOTENV_PATH or "(none found)",
+        "key_in_dotenv": bool(in_file),
+        "key_in_use": bool(live),
+        "key_length": len(live),
+        "prefix_looks_right": live.startswith("sk-ant-"),
+        "looks_like_placeholder": "your-key" in live or "paste" in live.lower(),
+        "shell_overrides_dotenv": bool(in_file and live and in_file != live),
+    }
 
 
 def _bool(name: str, default: bool = False) -> bool:

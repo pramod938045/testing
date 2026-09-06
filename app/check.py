@@ -99,6 +99,19 @@ async def main() -> int:
         print("  https://console.anthropic.com/settings/keys\n")
         return 1
 
+    from .ai_health import check_anthropic
+
+    ai = await check_anthropic()
+    if ai["anthropic"] != "ok":
+        print(f"\n  Anthropic: {ai['anthropic']}")
+        if ai.get("fix"):
+            print(f"  {ai['fix']}")
+        if ai.get("warning"):
+            print(f"  {ai['warning']}")
+        print(f"\n  .env file in use: {ai['key']['dotenv_file']}\n")
+        return 1
+    print("  Anthropic OK — key accepted")
+
     if not port_is_free():
         print(f"\n  Port {PORT} is already in use — something else is running there.")
         print("  Close the other window, or the old chatbot may still be running.")
