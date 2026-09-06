@@ -207,7 +207,13 @@ async function lookup(key) {
   out.innerHTML = '<div class="msg wait">Reading Jira…</div>';
   try {
     const res = await fetch('/api/issue/' + encodeURIComponent(key));
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { detail: `Server error ${res.status}: ${text.slice(0, 200) || res.statusText}` };
+    }
     if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
     render(data);
     history.replaceState(null, '', '/lookup?key=' + encodeURIComponent(key));

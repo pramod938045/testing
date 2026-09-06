@@ -146,6 +146,18 @@ async def chat(request: ChatRequest) -> ChatResponse:
     if state.get("jira") is None:
         raise HTTPException(status_code=503, detail="Jira client is not configured.")
 
+    # Without a key the SDK raises a TypeError deep inside the request, which
+    # would surface as a plain-text 500 the browser cannot parse. Say it plainly.
+    if not settings.anthropic_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No Anthropic API key is configured, so I cannot answer questions. "
+                "Run `python -m app.setup` to add one, then restart the server. "
+                "Ticket lookup at /lookup works without a key."
+            ),
+        )
+
     session_id, agent = _get_agent(request.session_id)
     try:
         result = await agent.chat(request.message.strip())
@@ -153,11 +165,29 @@ async def chat(request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=502, detail="Claude rejected the API key. Check ANTHROPIC_API_KEY.")
     except anthropic.RateLimitError:
         raise HTTPException(status_code=429, detail="Claude is rate limiting. Try again shortly.")
+    except anthropic.BadRequestError as exc:
+        if "credit balance" in str(exc).lower():
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    "The Anthropic account has no credit, so no question can be answered. "
+                    "Add funds at https://console.anthropic.com/settings/billing. "
+                    "Ticket lookup at /lookup works without credit."
+                ),
+            )
+        raise HTTPException(status_code=502, detail=f"Claude rejected the request: {exc}"[:300])
     except anthropic.APIStatusError as exc:
         logger.exception("Claude API error")
         raise HTTPException(status_code=502, detail=f"Claude API error ({exc.status_code}).")
     except anthropic.APIConnectionError:
         raise HTTPException(status_code=502, detail="Could not reach the Claude API.")
+    except Exception:
+        # Nothing may escape as a plain-text 500: the page parses JSON.
+        logger.exception("Unexpected failure answering a chat message")
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong answering that. The server window shows the detail.",
+        )
 
     return ChatResponse(
         session_id=session_id,
