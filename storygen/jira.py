@@ -1,4 +1,10 @@
-"""Minimal Jira Cloud REST client — only what the story generator needs."""
+"""Minimal Jira Cloud REST client — only what the story generator needs.
+
+READ-ONLY BY DESIGN. `_request` refuses any call that could change Jira data:
+only GET, and POST to the two search endpoints (search is a read that happens
+to use POST), are allowed. Nothing here can create, edit, transition or delete
+an issue, and a future edit that tried to would raise instead of writing.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +17,8 @@ import httpx
 from .adf import to_text
 
 ISSUE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
+# The only non-GET calls allowed: searching reads data but uses POST.
+SEARCH_PATHS = ("/rest/api/3/search/jql", "/rest/api/3/search")
 CONTEXT_FIELDS = [
     "summary",
     "description",
@@ -56,7 +64,25 @@ class Jira:
     def close(self) -> None:
         self.http.close()
 
+    @staticmethod
+    def _refuse_writes(method: str, path: str) -> None:
+        """Block anything that could modify Jira.
+
+        Searching uses POST but only reads, so those two paths are allowed.
+        Every other non-GET call raises before a request is sent.
+        """
+        method = method.upper()
+        if method == "GET":
+            return
+        if method == "POST" and path in SEARCH_PATHS:
+            return
+        raise JiraError(
+            f"Blocked: {method} {path} would modify Jira. This tool is read-only "
+            "and never creates, edits or deletes anything."
+        )
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        self._refuse_writes(method, path)
         try:
             response = self.http.request(method, path, **kwargs)
         except httpx.RequestError as exc:
