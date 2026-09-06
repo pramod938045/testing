@@ -84,6 +84,21 @@ async def main() -> int:
         print("  Check you pasted the whole key, with no quotes or spaces around it.\n")
         return 1
 
+    # Catch the example text being pasted verbatim instead of a real key.
+    if "your-key" in key or "your_key" in key or "paste" in key.lower():
+        print("\n  That is the example text, not a real key:")
+        print(f"    {key}")
+        print("\n  Replace it with your own key from")
+        print("  https://console.anthropic.com/settings/keys")
+        print("  A real key is a long random string, about 100 characters.\n")
+        return 1
+
+    if len(key) < 40:
+        print(f"\n  ANTHROPIC_API_KEY is only {len(key)} characters — too short to be real.")
+        print("  A real key is about 100 characters. Copy the whole thing from")
+        print("  https://console.anthropic.com/settings/keys\n")
+        return 1
+
     if not port_is_free():
         print(f"\n  Port {PORT} is already in use — something else is running there.")
         print("  Close the other window, or the old chatbot may still be running.")
