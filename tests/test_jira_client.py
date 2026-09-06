@@ -97,7 +97,7 @@ async def test_api_errors_carry_the_jira_message_and_a_hint(make_client):
 
     assert exc.value.status_code == 401
     assert "Client must be authenticated" in exc.value.message
-    assert "JIRA_API_TOKEN" in exc.value.message
+    assert "credentials in .env" in exc.value.message
     await client.aclose()
 
 

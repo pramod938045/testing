@@ -1,4 +1,9 @@
-"""Async Jira Cloud REST client (API v3 + Agile API v1.0).
+"""Async Jira REST client for Jira Cloud and Jira Data Center / Server.
+
+Cloud uses REST v3 with Basic auth (email + API token); Data Center uses v2
+with a personal access token sent as `Bearer`. The deployment is detected from
+the site URL and every path is built for the right API version, so the rest of
+the app is identical either way.
 
 READ-ONLY BY DESIGN. `_request` refuses anything that could change Jira: only
 GET, and POST to the search endpoints (search reads but uses POST), are
@@ -36,7 +41,17 @@ DEFAULT_FIELDS = [
 DETAIL_FIELDS = DEFAULT_FIELDS + ["description", "subtasks", "issuelinks", "timetracking", "resolution"]
 
 # The only non-GET calls allowed: searching reads data but uses POST.
-SEARCH_PATHS = ("/rest/api/3/search/jql", "/rest/api/3/search")
+# Both API versions, since Cloud is v3 and Data Center is v2.
+SEARCH_PATHS = (
+    "/rest/api/3/search/jql", "/rest/api/3/search",
+    "/rest/api/2/search/jql", "/rest/api/2/search",
+)
+
+
+def detect_deployment(base_url: str) -> str:
+    """Cloud sites live on atlassian.net; anything else is Server/Data Center."""
+    host = base_url.split("//", 1)[-1].split("/", 1)[0].lower()
+    return "cloud" if host.endswith(".atlassian.net") or host.endswith(".jira.com") else "server"
 
 
 class JiraError(RuntimeError):
@@ -64,19 +79,40 @@ class JiraClient:
         api_token: str,
         timeout: float = 30.0,
         client: httpx.AsyncClient | None = None,
+        deployment: str = "auto",
     ):
+        """`deployment`: "cloud", "server" (Data Center / Server), or "auto".
+
+        Cloud uses REST v3 with Basic auth (email + API token) and returns rich
+        text as ADF. Server/Data Center uses v2, authenticates a Personal Access
+        Token with `Bearer`, and returns rich text as a plain wiki-markup string
+        — which `render()` already passes through untouched.
+        """
         self.base_url = base_url.rstrip("/")
         self.email = email
-        token = base64.b64encode(f"{email}:{api_token}".encode()).decode()
+        self.deployment = detect_deployment(self.base_url) if deployment == "auto" else deployment
+        self.api = "3" if self.deployment == "cloud" else "2"
+
+        if self.deployment == "cloud":
+            token = base64.b64encode(f"{email}:{api_token}".encode()).decode()
+            authorization = f"Basic {token}"
+        else:
+            # Data Center personal access tokens are sent as bearer tokens.
+            authorization = f"Bearer {api_token}"
+
         self._client = client or httpx.AsyncClient(
             base_url=self.base_url,
             timeout=timeout,
             headers={
-                "Authorization": f"Basic {token}",
+                "Authorization": authorization,
                 "Accept": "application/json",
                 "Content-Type": "application/json",
             },
         )
+
+    def path(self, suffix: str) -> str:
+        """A REST path for whichever API version this deployment uses."""
+        return f"/rest/api/{self.api}/{suffix.lstrip('/')}"
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -132,7 +168,7 @@ class JiraClient:
             detail = (response.text or "").strip()[:300]
 
         hints = {
-            401: "Check JIRA_EMAIL and JIRA_API_TOKEN.",
+            401: "Check the Jira credentials in .env.",
             403: "The Jira account lacks permission for this operation.",
             404: "Not found — check the issue key, project or id.",
         }
@@ -182,7 +218,7 @@ class JiraClient:
     # ------------------------------------------------------------------ read
 
     async def myself(self) -> dict[str, Any]:
-        me = await self._request("GET", "/rest/api/3/myself")
+        me = await self._request("GET", self.path("myself"))
         return {
             "account_id": me.get("accountId"),
             "display_name": me.get("displayName"),
@@ -209,12 +245,18 @@ class JiraClient:
         }
         if next_page_token:
             body["nextPageToken"] = next_page_token
-        try:
-            payload = await self._request("POST", "/rest/api/3/search/jql", json=body)
-        except JiraError as exc:
-            if exc.status_code not in (404, 410):
-                raise
-            payload = await self._request("POST", "/rest/api/3/search", json=body)
+
+        if self.deployment == "server":
+            # Data Center only has the classic endpoint, and pages by offset.
+            body.pop("nextPageToken", None)
+            payload = await self._request("POST", self.path("search"), json=body)
+        else:
+            try:
+                payload = await self._request("POST", self.path("search/jql"), json=body)
+            except JiraError as exc:
+                if exc.status_code not in (404, 410):
+                    raise
+                payload = await self._request("POST", self.path("search"), json=body)
 
         issues = [self.simplify_issue(issue) for issue in payload.get("issues", [])]
         result: dict[str, Any] = {"jql": jql, "count": len(issues), "issues": issues}
@@ -226,7 +268,7 @@ class JiraClient:
 
     async def get_issue(self, key: str) -> dict[str, Any]:
         payload = await self._request(
-            "GET", f"/rest/api/3/issue/{key}", params={"fields": ",".join(DETAIL_FIELDS)}
+            "GET", self.path(f"issue/{key}"), params={"fields": ",".join(DETAIL_FIELDS)}
         )
         return self.simplify_issue(payload, include_description=True)
 
@@ -239,7 +281,7 @@ class JiraClient:
         """
         fields = DETAIL_FIELDS + ["comment", "fixVersions", "components"]
         payload = await self._request(
-            "GET", f"/rest/api/3/issue/{key}", params={"fields": ",".join(fields)}
+            "GET", self.path(f"issue/{key}"), params={"fields": ",".join(fields)}
         )
         f = payload.get("fields") or {}
 
@@ -311,7 +353,7 @@ class JiraClient:
     async def get_comments(self, key: str, limit: int = 20) -> dict[str, Any]:
         payload = await self._request(
             "GET",
-            f"/rest/api/3/issue/{key}/comment",
+            self.path(f"issue/{key}/comment"),
             params={"maxResults": limit, "orderBy": "-created"},
         )
         comments = [
@@ -326,20 +368,36 @@ class JiraClient:
         return {"key": key, "count": len(comments), "comments": comments}
 
     async def list_projects(self, query: str | None = None, limit: int = 25) -> dict[str, Any]:
-        params: dict[str, Any] = {"maxResults": limit}
-        if query:
-            params["query"] = query
-        payload = await self._request("GET", "/rest/api/3/project/search", params=params)
+        if self.deployment == "server":
+            # Data Center returns every visible project as a plain list.
+            payload = await self._request("GET", self.path("project"))
+            projects = payload if isinstance(payload, list) else []
+            if query:
+                needle = query.lower()
+                projects = [
+                    project
+                    for project in projects
+                    if needle in (project.get("key", "") + project.get("name", "")).lower()
+                ]
+            projects = projects[:limit]
+        else:
+            params: dict[str, Any] = {"maxResults": limit}
+            if query:
+                params["query"] = query
+            payload = await self._request("GET", self.path("project/search"), params=params)
+            projects = payload.get("values", [])
+
         return {
             "projects": [
                 {"key": project.get("key"), "name": project.get("name"), "id": project.get("id")}
-                for project in payload.get("values", [])
+                for project in projects
             ]
         }
 
     async def find_user(self, query: str, limit: int = 5) -> dict[str, Any]:
+        field = "username" if self.deployment == "server" else "query"
         payload = await self._request(
-            "GET", "/rest/api/3/user/search", params={"query": query, "maxResults": limit}
+            "GET", self.path("user/search"), params={field: query, "maxResults": limit}
         )
         return {
             "users": [
@@ -356,7 +414,7 @@ class JiraClient:
     async def list_transitions(self, key: str) -> dict[str, Any]:
         """Which statuses an issue *could* move to. Reading only — the
         assistant cannot perform a transition."""
-        payload = await self._request("GET", f"/rest/api/3/issue/{key}/transitions")
+        payload = await self._request("GET", self.path(f"issue/{key}/transitions"))
         return {
             "key": key,
             "transitions": [

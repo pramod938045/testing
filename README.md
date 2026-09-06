@@ -35,6 +35,24 @@ are built from.
 
 The UI also lists every Jira call behind each answer, so you can see exactly what it read.
 
+## Jira Cloud and Jira Data Center
+
+Both are supported, and the deployment is detected from `JIRA_BASE_URL`
+(`*.atlassian.net` is Cloud; anything else is Data Center / Server). Override
+with `JIRA_DEPLOYMENT=cloud|server` if the detection is wrong.
+
+| | Jira Cloud | Jira Data Center / Server |
+| --- | --- | --- |
+| REST API | v3 | v2 |
+| Auth | Basic: `JIRA_EMAIL` + API token | `Bearer`: Personal Access Token, no email |
+| Token from | id.atlassian.com → Security → API tokens | your Jira → Profile → Personal Access Tokens |
+| Rich text | ADF | wiki markup |
+
+The tokens are not interchangeable: a Cloud API token is rejected by Data
+Center, which is what a `403` from a self-hosted site usually means. One
+running instance talks to one site — point `JIRA_BASE_URL` at whichever holds
+the issues you want.
+
 ## Setup
 
 Requires Python 3.11+.

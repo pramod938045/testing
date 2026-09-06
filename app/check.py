@@ -124,6 +124,7 @@ async def main() -> int:
         email=settings.jira_email,
         api_token=settings.jira_api_token,
         timeout=settings.jira_timeout_seconds,
+        deployment=settings.jira_deployment,
     )
     try:
         user = await jira.myself()

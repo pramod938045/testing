@@ -58,6 +58,8 @@ class Settings:
     jira_api_token: str = field(default_factory=lambda: os.getenv("JIRA_API_TOKEN", ""))
     jira_default_project: str = field(default_factory=lambda: os.getenv("JIRA_DEFAULT_PROJECT", ""))
     jira_timeout_seconds: float = field(default_factory=lambda: float(os.getenv("JIRA_TIMEOUT_SECONDS", "30")))
+    # cloud | server | auto — "auto" reads it from the site URL.
+    jira_deployment: str = field(default_factory=lambda: os.getenv("JIRA_DEPLOYMENT", "auto").lower())
 
     # --- Claude ---
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
@@ -74,16 +76,25 @@ class Settings:
     max_search_results: int = field(default_factory=lambda: _int("MAX_SEARCH_RESULTS", 50))
     history_turns: int = field(default_factory=lambda: _int("HISTORY_TURNS", 20))
 
+    @property
+    def deployment(self) -> str:
+        """cloud or server, resolved from JIRA_DEPLOYMENT or the site URL."""
+        if self.jira_deployment in ("cloud", "server"):
+            return self.jira_deployment
+        from .jira_client import detect_deployment
+
+        return detect_deployment(self.jira_base_url)
+
     def validate(self) -> None:
-        missing = [
-            name
-            for name, value in (
-                ("JIRA_BASE_URL", self.jira_base_url),
-                ("JIRA_EMAIL", self.jira_email),
-                ("JIRA_API_TOKEN", self.jira_api_token),
-            )
-            if not value
+        required = [
+            ("JIRA_BASE_URL", self.jira_base_url),
+            ("JIRA_API_TOKEN", self.jira_api_token),
         ]
+        # Data Center authenticates with the token alone; Cloud needs the email.
+        if self.deployment == "cloud":
+            required.insert(1, ("JIRA_EMAIL", self.jira_email))
+
+        missing = [name for name, value in required if not value]
         if missing:
             raise ConfigError(
                 "Missing required environment variables: "
