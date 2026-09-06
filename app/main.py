@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -23,6 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 
 state: dict[str, Any] = {"jira": None, "jira_user": {}}
 sessions: SessionStore[JiraChatAgent] = SessionStore(
@@ -84,6 +86,30 @@ def _get_agent(session_id: str | None) -> tuple[str, JiraChatAgent]:
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/lookup")
+async def lookup_page() -> FileResponse:
+    """Ticket lookup — reads Jira directly, needs no AI key."""
+    return FileResponse(STATIC_DIR / "lookup.html")
+
+
+@app.get("/api/issue/{key}")
+async def get_issue(key: str) -> dict[str, Any]:
+    jira: JiraClient | None = state.get("jira")
+    if jira is None:
+        raise HTTPException(status_code=503, detail="Jira client is not configured.")
+
+    key = key.strip().upper()
+    if not ISSUE_KEY_RE.match(key):
+        raise HTTPException(
+            status_code=400, detail=f"'{key}' is not an issue key. Try something like DFE-9067."
+        )
+    try:
+        return await jira.get_issue_full(key)
+    except JiraError as exc:
+        status = 404 if exc.status_code == 404 else 502
+        raise HTTPException(status_code=status, detail=exc.message)
 
 
 @app.get("/api/health")

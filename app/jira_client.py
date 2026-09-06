@@ -230,6 +230,84 @@ class JiraClient:
         )
         return self.simplify_issue(payload, include_description=True)
 
+    async def get_issue_full(self, key: str) -> dict[str, Any]:
+        """Everything about one issue, in a single request.
+
+        Powers the ticket-lookup page: description, people, dates, links,
+        subtasks and comments. Comments come back inside the same response,
+        so no second call is needed.
+        """
+        fields = DETAIL_FIELDS + ["comment", "fixVersions", "components"]
+        payload = await self._request(
+            "GET", f"/rest/api/3/issue/{key}", params={"fields": ",".join(fields)}
+        )
+        f = payload.get("fields") or {}
+
+        def name(value: Any, attr: str = "name") -> str:
+            return (value or {}).get(attr, "") if isinstance(value, dict) else ""
+
+        links = []
+        for link in f.get("issuelinks") or []:
+            other = link.get("outwardIssue") or link.get("inwardIssue")
+            if not other:
+                continue
+            relation = (link.get("type") or {}).get(
+                "outward" if link.get("outwardIssue") else "inward", "relates to"
+            )
+            other_fields = other.get("fields") or {}
+            links.append(
+                {
+                    "relation": relation,
+                    "key": other.get("key"),
+                    "summary": other_fields.get("summary", ""),
+                    "status": name(other_fields.get("status")),
+                    "url": self.issue_url(other.get("key", "")),
+                }
+            )
+
+        comments = [
+            {
+                "author": (c.get("author") or {}).get("displayName", ""),
+                "created": c.get("created", ""),
+                "body": render(c.get("body"), limit=4000),
+            }
+            for c in ((f.get("comment") or {}).get("comments") or [])
+        ]
+
+        return {
+            "key": payload.get("key"),
+            "url": self.issue_url(payload.get("key", "")),
+            "summary": f.get("summary", ""),
+            "type": name(f.get("issuetype")),
+            "status": name(f.get("status")),
+            "status_category": (f.get("status") or {}).get("statusCategory", {}).get("name", ""),
+            "priority": name(f.get("priority")),
+            "resolution": name(f.get("resolution")),
+            "project": name(f.get("project")),
+            "project_key": name(f.get("project"), "key"),
+            "assignee": name(f.get("assignee"), "displayName") or "Unassigned",
+            "reporter": name(f.get("reporter"), "displayName"),
+            "created": f.get("created", ""),
+            "updated": f.get("updated", ""),
+            "due_date": f.get("duedate") or "",
+            "labels": f.get("labels") or [],
+            "components": [name(c) for c in f.get("components") or []],
+            "fix_versions": [name(v) for v in f.get("fixVersions") or []],
+            "parent": (f.get("parent") or {}).get("key", ""),
+            "description": render(f.get("description"), limit=None),
+            "subtasks": [
+                {
+                    "key": s.get("key"),
+                    "summary": (s.get("fields") or {}).get("summary", ""),
+                    "status": name((s.get("fields") or {}).get("status")),
+                    "url": self.issue_url(s.get("key", "")),
+                }
+                for s in f.get("subtasks") or []
+            ],
+            "links": links,
+            "comments": comments,
+        }
+
     async def get_comments(self, key: str, limit: int = 20) -> dict[str, Any]:
         payload = await self._request(
             "GET",
