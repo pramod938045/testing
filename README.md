@@ -127,6 +127,27 @@ How it behaves:
 The bot is read-only in Slack too: it answers questions about Jira and cannot change
 anything, whoever asks.
 
+## Three chat modes
+
+| URL | What answers | Needs |
+| --- | --- | --- |
+| `/` | Claude, choosing Jira calls itself | Anthropic key with credit |
+| `/?jira` | **Real Jira, no AI** — type an issue key | Jira only |
+| `/?demo` | Built-in sample issues | nothing |
+
+`/?jira` is the fallback when the AI is unavailable, and the default when no
+`ANTHROPIC_API_KEY` is set. It finds an issue key anywhere in your message
+(`what does UPAMCORE-30728 say?`), fetches that issue with the same
+`JiraClient.get_issue_full()` the lookup page uses, and shows the real key,
+summary, description, status, assignee, reporter, priority, labels, linked
+issues and subtasks. Follow-ups — *what's the status?*, *who is it assigned to?*,
+*show the comments* — are answered from the issue already retrieved, with no
+second request. A missing issue says so; an authentication failure shows Jira's
+own error. Nothing is hardcoded and nothing is written.
+
+The response says which mode answered, and the page shows a banner for each, so
+it can never be unclear whether data is real.
+
 ## Demo mode
 
 Every story-generator command takes `--demo`, which uses built-in sample data

@@ -44,12 +44,14 @@ def test_demo_chat_never_calls_jira_or_the_ai(client, monkeypatch):
     ask(client, "What's assigned to me and not done?")
 
 
-def test_without_the_demo_flag_a_missing_key_is_still_reported(client):
-    """Demo mode is opt-in — it must not silently replace real answers."""
-    response = client.post("/api/chat", json={"message": "hi"})
+def test_without_the_demo_flag_no_key_uses_real_jira_not_samples(client, monkeypatch):
+    """Demo mode is opt-in: a missing AI key must never silently return samples."""
+    monkeypatch.setattr(main.jira_sessions, "_items", {})
+    response = client.post("/api/chat", json={"message": "hello"})
 
-    assert response.status_code == 503
-    assert "/?demo" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["mode"] == "jira"
+    assert "DEMO-1" not in response.json()["reply"]
 
 
 def test_every_demo_reply_says_it_is_sample_data(client):
@@ -122,7 +124,7 @@ def test_the_page_switches_to_demo_from_the_url():
     assert "has('demo')" in page
     assert "demo: demoMode" in page, "the flag must be sent to the server"
     assert "demoBar" in page, "demo mode must be visibly signposted"
-    assert "Try demo mode instead" in page, "a key error should offer demo mode"
+    assert "Use real Jira without the AI" in page, "a key error should offer real Jira mode"
 
 
 def test_pages_are_sent_with_no_cache_headers(client):

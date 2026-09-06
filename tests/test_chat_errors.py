@@ -40,17 +40,20 @@ def api_error(cls, status, message):
     return cls(message, response=response, body=None)
 
 
-def test_a_missing_key_gives_a_readable_json_message(client, monkeypatch):
-    """Without a key the SDK raises TypeError mid-request — a plain-text 500."""
+def test_a_missing_key_falls_back_to_real_jira_not_an_error(client, monkeypatch):
+    """Without an AI key the chat answers from real Jira rather than refusing.
+
+    It used to 503 here; the SDK's TypeError could never escape as a
+    plain-text 500 either way, which is what this file guards.
+    """
     monkeypatch.setattr(main.settings, "anthropic_api_key", "")
+    monkeypatch.setattr(main.jira_sessions, "_items", {})
 
-    response = client.post("/api/chat", json={"message": "hi"})
+    response = client.post("/api/chat", json={"message": "hello"})
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
-    detail = response.json()["detail"]
-    assert "app.setup" in detail
-    assert "/lookup" in detail
+    assert response.json()["mode"] == "jira"
 
 
 def test_an_account_with_no_credit_is_named(client, monkeypatch):

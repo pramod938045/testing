@@ -98,6 +98,12 @@
     .demo-bar { background: #3a2c12; color: #f3cd8e; border-bottom-color: #6b4f1d; }
   }
   .demo-bar a { color: inherit; font-weight: 600; }
+  .jira-bar {
+    background: var(--accent-soft); color: var(--accent);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 20px; font-size: 13px; text-align: center;
+  }
+  .jira-bar a { color: inherit; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -105,9 +111,14 @@
   Demo mode — answers come from built-in sample issues, not your Jira.
   <a href="/">Leave demo</a>
 </div>
+<div class="jira-bar" id="jiraBar" hidden>
+  Real Jira mode — live data from your Jira, answered without the AI.
+  Type an issue key such as <strong>UPAMCORE-30728</strong>.
+</div>
 <header>
   <h1>Jira Chatbot</h1>
   <a href="/lookup" style="color:var(--accent);font-size:13px;text-decoration:none">Ticket lookup →</a>
+  <a href="/?jira" style="color:var(--accent);font-size:13px;text-decoration:none">Real Jira →</a>
   <a href="/?demo" id="demoLink" style="color:var(--accent);font-size:13px;text-decoration:none">Demo →</a>
   <span class="status" id="status">connecting…</span>
   <button id="reset" type="button">New chat</button>
@@ -147,7 +158,33 @@ const sendBtn = document.getElementById('send');
 const statusEl = document.getElementById('status');
 let sessionId = null;
 let busy = false;
-const demoMode = new URLSearchParams(location.search).has('demo');
+const params = new URLSearchParams(location.search);
+const demoMode = params.has('demo');
+// "jira" = real Jira without the AI. The server also falls back to it when no
+// API key is configured, and tells us which mode actually answered.
+let chatMode = demoMode ? 'demo' : (params.has('jira') ? 'jira' : 'auto');
+
+const JIRA_CHIPS = [
+  'UPAMCORE-30728',
+  "What's the status?",
+  'Who is it assigned to?',
+  'Show the description',
+];
+
+function showJiraBar() {
+  const bar = document.getElementById('jiraBar');
+  if (bar.hidden === false) return;
+  bar.hidden = false;
+  const intro = document.querySelector('.msg.assistant .body p');
+  intro.innerHTML = 'I\'m reading your <strong>real Jira</strong> directly — no AI needed. '
+    + 'Type an issue key such as <strong>UPAMCORE-30728</strong> and I\'ll fetch it, '
+    + 'then ask follow-ups about its status, assignee, description, comments or links.';
+  const chips = document.querySelector('.chips');
+  if (chips) {
+    chips.innerHTML = JIRA_CHIPS.map(t => `<button type="button">${t}</button>`).join('');
+  }
+  statusEl.textContent = 'real Jira · read-only · no AI';
+}
 
 const DEMO_CHIPS = [
   'What does DEMO-1 say?',
@@ -155,6 +192,8 @@ const DEMO_CHIPS = [
   "What's assigned to me and not done?",
   'Summarise the current sprint',
 ];
+
+if (chatMode === 'jira') showJiraBar();
 
 if (demoMode) {
   document.getElementById('demoBar').hidden = false;
@@ -267,16 +306,20 @@ async function send(text) {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, session_id: sessionId, demo: demoMode })
+      body: JSON.stringify({
+        message: text, session_id: sessionId, demo: demoMode, mode: chatMode,
+      })
     });
     const data = await readJson(res);
     if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`);
     sessionId = data.session_id;
+    // The server reports which mode answered; reflect it so the UI never lies.
+    if (data.mode === 'jira' && !demoMode) { chatMode = 'jira'; showJiraBar(); }
     pending.innerHTML = toolsHtml(data.tool_calls) + md(data.reply);
   } catch (err) {
     let extra = '';
     if (!demoMode && /API key|no credit/i.test(err.message)) {
-      extra = ' <a href="/?demo">Try demo mode instead →</a>';
+      extra = ' <a href="/?jira">Use real Jira without the AI →</a>';
     }
     pending.innerHTML = `<p class="err">${escapeHtml(err.message)}${extra}</p>`;
   } finally {

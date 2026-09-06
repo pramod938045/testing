@@ -20,6 +20,7 @@ from .ai_health import check_anthropic
 from .config import ConfigError, settings
 from .demo_agent import DemoAgent
 from .jira_client import JiraClient, JiraError
+from .jira_direct import JiraDirectAgent
 from .sessions import SessionStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -27,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 # Bump when a user-visible feature lands, so /api/version can prove what is running.
-FEATURES = {"ticket_lookup", "read_only", "anthropic_health", "demo_chat", "no_cache_pages"}
+FEATURES = {
+    "ticket_lookup", "read_only", "anthropic_health", "demo_chat",
+    "no_cache_pages", "real_jira_chat",
+}
 ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 
 state: dict[str, Any] = {"jira": None, "jira_user": {}}
@@ -36,6 +40,10 @@ sessions: SessionStore[JiraChatAgent] = SessionStore(
 )
 # Demo conversations are kept apart so they can never mix with real ones.
 demo_sessions: SessionStore[DemoAgent] = SessionStore(factory=DemoAgent)
+# Real Jira, answered without the AI. Kept apart from both other modes.
+jira_sessions: SessionStore[JiraDirectAgent] = SessionStore(
+    factory=lambda: JiraDirectAgent(jira=state["jira"])
+)
 
 
 @asynccontextmanager
@@ -66,6 +74,9 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     session_id: str | None = None
     demo: bool = False
+    # "auto" uses the AI when a key is configured and falls back to real Jira
+    # without it; "jira" forces real Jira with no AI; "demo" forces samples.
+    mode: str = "auto"
 
 
 class SessionRequest(BaseModel):
@@ -83,11 +94,24 @@ class ChatResponse(BaseModel):
     session_id: str
     reply: str
     tool_calls: list[ToolCallOut]
+    mode: str = "ai"
 
 
-def _get_agent(session_id: str | None, demo: bool = False) -> tuple[str, Any]:
+STORES = {"ai": lambda: sessions, "demo": lambda: demo_sessions, "jira": lambda: jira_sessions}
+
+
+def _resolve_mode(request: ChatRequest) -> str:
+    """demo | jira | ai — explicit wins, else AI when a key is set."""
+    if request.demo or request.mode == "demo":
+        return "demo"
+    if request.mode == "jira":
+        return "jira"
+    return "ai" if settings.anthropic_api_key else "jira"
+
+
+def _get_agent(session_id: str | None, mode: str = "ai") -> tuple[str, Any]:
     key = session_id or uuid.uuid4().hex
-    return key, (demo_sessions if demo else sessions).get(key)
+    return key, STORES[mode]().get(key)
 
 
 # Browsers happily serve a cached copy of these pages after an update, which
@@ -112,6 +136,7 @@ async def version() -> dict[str, Any]:
     return {
         "features": sorted(FEATURES),
         "demo_chat": "demo_chat" in FEATURES,
+        "real_jira_chat": "real_jira_chat" in FEATURES,
         "hint": "If a feature you expect is missing here, the server is running old code: "
         "stop it, `git pull`, and start it again.",
     }
@@ -168,34 +193,30 @@ async def chat(request: ChatRequest) -> ChatResponse:
     if state.get("jira") is None:
         raise HTTPException(status_code=503, detail="Jira client is not configured.")
 
-    # Demo mode answers from sample data: no key, no Jira, no AI call.
-    if request.demo:
-        session_id, agent = _get_agent(request.session_id, demo=True)
+    mode = _resolve_mode(request)
+
+    # Demo (samples) and real-Jira mode both answer without the AI.
+    if mode in ("demo", "jira"):
+        session_id, agent = _get_agent(request.session_id, mode)
         result = await agent.chat(request.message.strip())
         return ChatResponse(
             session_id=session_id,
             reply=result.reply,
+            mode=mode,
             tool_calls=[ToolCallOut(**asdict(call)) for call in result.tool_calls],
         )
 
-    # Without a key the SDK raises a TypeError deep inside the request, which
-    # would surface as a plain-text 500 the browser cannot parse. Say it plainly.
-    if not settings.anthropic_api_key:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "No Anthropic API key is configured, so I cannot answer questions. "
-                "Run `python -m app.setup` to add one, then restart the server. "
-                "To see how the chat works meanwhile, open /?demo — and ticket "
-                "lookup at /lookup reads your real Jira without a key."
-            ),
-        )
-
-    session_id, agent = _get_agent(request.session_id)
+    session_id, agent = _get_agent(request.session_id, "ai")
     try:
         result = await agent.chat(request.message.strip())
     except anthropic.AuthenticationError:
-        raise HTTPException(status_code=502, detail="Claude rejected the API key. Check ANTHROPIC_API_KEY.")
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Claude rejected the API key. Check ANTHROPIC_API_KEY. "
+                "Meanwhile /?jira reads your real Jira without the AI."
+            ),
+        )
     except anthropic.RateLimitError:
         raise HTTPException(status_code=429, detail="Claude is rate limiting. Try again shortly.")
     except anthropic.BadRequestError as exc:
@@ -205,7 +226,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 detail=(
                     "The Anthropic account has no credit, so no question can be answered. "
                     "Add funds at https://console.anthropic.com/settings/billing. "
-                    "Ticket lookup at /lookup works without credit."
+                    "Meanwhile /?jira reads your real Jira without the AI."
                 ),
             )
         raise HTTPException(status_code=502, detail=f"Claude rejected the request: {exc}"[:300])
@@ -225,6 +246,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     return ChatResponse(
         session_id=session_id,
         reply=result.reply,
+        mode="ai",
         tool_calls=[ToolCallOut(**asdict(call)) for call in result.tool_calls],
     )
 
@@ -235,6 +257,7 @@ async def reset(request: SessionRequest | None = None) -> dict[str, str]:
     if session_id:
         sessions.pop(session_id)
         demo_sessions.pop(session_id)
+        jira_sessions.pop(session_id)
     return {"status": "cleared"}
 
 
