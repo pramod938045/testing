@@ -8,7 +8,20 @@ from typing import Any
 
 import httpx
 
+from .adf import to_text
+
 ISSUE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+$")
+CONTEXT_FIELDS = [
+    "summary",
+    "description",
+    "status",
+    "issuetype",
+    "project",
+    "labels",
+    "priority",
+    "issuelinks",
+    "subtasks",
+]
 # Issue types worth generating stories from. "Change Request" doesn't exist on
 # every site, so a search that mentions it falls back to searching all types.
 PARENT_TYPES = ("Epic", "Change Request")
@@ -84,6 +97,56 @@ class Jira:
         return self._request(
             "GET", f"/rest/api/3/issue/{key}", params={"fields": ",".join(fields)}
         )
+
+    def get_context(self, key: str, description_limit: int = 6000) -> dict[str, Any]:
+        """Everything the AI needs about one Epic / Change Request.
+
+        Linked issues carry their own summary and status in the same response,
+        so no extra requests are needed.
+        """
+        issue = self.get_issue(key, CONTEXT_FIELDS)
+        fields = issue.get("fields") or {}
+
+        def name(value: Any, attr: str = "name") -> str:
+            return (value or {}).get(attr, "") if isinstance(value, dict) else ""
+
+        links = []
+        for link in fields.get("issuelinks") or []:
+            other = link.get("outwardIssue") or link.get("inwardIssue")
+            if not other:
+                continue
+            relation = (
+                link["type"].get("outward" if link.get("outwardIssue") else "inward", "relates to")
+                if link.get("type")
+                else "relates to"
+            )
+            other_fields = other.get("fields") or {}
+            links.append(
+                {
+                    "relation": relation,
+                    "key": other.get("key"),
+                    "summary": other_fields.get("summary", ""),
+                    "status": name(other_fields.get("status")),
+                    "type": name(other_fields.get("issuetype")),
+                }
+            )
+
+        return {
+            "key": issue.get("key"),
+            "summary": fields.get("summary", ""),
+            "type": name(fields.get("issuetype")),
+            "status": name(fields.get("status")),
+            "project": name(fields.get("project"), "key"),
+            "priority": name(fields.get("priority")),
+            "labels": fields.get("labels") or [],
+            "description": to_text(fields.get("description"), description_limit),
+            "links": links,
+            "subtasks": [
+                {"key": sub.get("key"), "summary": (sub.get("fields") or {}).get("summary", "")}
+                for sub in fields.get("subtasks") or []
+            ],
+            "url": f"{self.base_url}/browse/{issue.get('key')}",
+        }
 
     def find_parents(self, query: str, limit: int = 20) -> tuple[list[dict[str, Any]], bool]:
         """Find candidate Epics / Change Requests by text.

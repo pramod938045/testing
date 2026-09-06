@@ -60,12 +60,49 @@ def find(config: Config, query: str) -> int:
         jira.close()
 
 
+def show(config: Config, key: str) -> int:
+    config.check_jira()
+    jira = Jira(config.jira_url, config.jira_email, config.jira_token)
+    try:
+        issue = jira.get_context(key.strip().upper())
+    finally:
+        jira.close()
+
+    print(f"{issue['key']}  [{issue['type']} / {issue['status']}]  {issue['url']}")
+    print(f"Summary: {issue['summary']}")
+    meta = [f"project {issue['project']}"]
+    if issue["priority"]:
+        meta.append(f"priority {issue['priority']}")
+    if issue["labels"]:
+        meta.append("labels " + ", ".join(issue["labels"]))
+    print("  (" + "; ".join(meta) + ")")
+
+    print("\n--- Description ---")
+    print(issue["description"] or "(empty)")
+
+    if issue["links"]:
+        print(f"\n--- Linked issues ({len(issue['links'])}) ---")
+        for link in issue["links"]:
+            print(f"  {link['relation']:<18} {link['key']:<12} [{link['status']}] {link['summary']}")
+
+    if issue["subtasks"]:
+        print(f"\n--- Existing subtasks ({len(issue['subtasks'])}) ---")
+        for sub in issue["subtasks"]:
+            print(f"  {sub['key']:<12} {sub['summary']}")
+
+    if not issue["description"]:
+        print("\nNote: no description — the AI will have only the summary to work from.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="storygen", description="Jira AI Story Generator")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("test-connection", help="Check the Jira credentials work")
     find_cmd = commands.add_parser("find", help="Find an Epic or Change Request")
     find_cmd.add_argument("query", help="An issue key (ABC-42) or text to search for")
+    show_cmd = commands.add_parser("show", help="Read one issue: description and linked issues")
+    show_cmd.add_argument("key", help="Issue key, e.g. DFE-9067")
 
     args = parser.parse_args(argv)
     config = Config.load()
@@ -75,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
             return test_connection(config)
         if args.command == "find":
             return find(config, args.query)
+        if args.command == "show":
+            return show(config, args.key)
     except (ConfigError, JiraError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
