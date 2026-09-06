@@ -1,0 +1,163 @@
+"""FastAPI app: a chat UI and a JSON API in front of the Jira agent."""
+
+from __future__ import annotations
+
+import logging
+import time
+import uuid
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+import anthropic
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+from .agent import JiraChatAgent
+from .config import ConfigError, settings
+from .jira_client import JiraClient, JiraError
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).parent / "static"
+SESSION_TTL_SECONDS = 60 * 60 * 4
+MAX_SESSIONS = 200
+
+state: dict[str, Any] = {"jira": None, "jira_user": {}}
+sessions: dict[str, tuple[float, JiraChatAgent]] = {}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings.validate()
+    jira = JiraClient(
+        base_url=settings.jira_base_url,
+        email=settings.jira_email,
+        api_token=settings.jira_api_token,
+        timeout=settings.jira_timeout_seconds,
+    )
+    state["jira"] = jira
+    try:
+        state["jira_user"] = await jira.myself()
+        logger.info("Connected to Jira as %s", state["jira_user"].get("display_name"))
+    except JiraError as exc:
+        # Don't refuse to boot: surface the problem via /api/health instead.
+        logger.error("Jira connection check failed: %s", exc.message)
+        state["jira_user"] = {}
+    yield
+    await jira.aclose()
+
+
+app = FastAPI(title="Jira Chatbot", version="1.0.0", lifespan=lifespan)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+    session_id: str | None = None
+
+
+class SessionRequest(BaseModel):
+    session_id: str | None = None
+
+
+class ToolCallOut(BaseModel):
+    name: str
+    args: dict[str, Any]
+    ok: bool
+    summary: str
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    reply: str
+    tool_calls: list[ToolCallOut]
+
+
+def _prune_sessions() -> None:
+    now = time.time()
+    for key in [k for k, (seen, _) in sessions.items() if now - seen > SESSION_TTL_SECONDS]:
+        sessions.pop(key, None)
+    while len(sessions) > MAX_SESSIONS:
+        oldest = min(sessions, key=lambda k: sessions[k][0])
+        sessions.pop(oldest, None)
+
+
+def _get_agent(session_id: str | None) -> tuple[str, JiraChatAgent]:
+    _prune_sessions()
+    if session_id and session_id in sessions:
+        _, agent = sessions[session_id]
+        sessions[session_id] = (time.time(), agent)
+        return session_id, agent
+
+    new_id = session_id or uuid.uuid4().hex
+    agent = JiraChatAgent(jira=state["jira"], settings=settings, jira_user=state["jira_user"])
+    sessions[new_id] = (time.time(), agent)
+    return new_id, agent
+
+
+@app.get("/")
+async def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/api/health")
+async def health() -> dict[str, Any]:
+    jira: JiraClient | None = state.get("jira")
+    result: dict[str, Any] = {
+        "jira_base_url": settings.jira_base_url,
+        "model": settings.model,
+        "writes_enabled": settings.allow_writes,
+        "active_sessions": len(sessions),
+    }
+    if jira is None:
+        result["jira"] = "not configured"
+    else:
+        try:
+            user = await jira.myself()
+            result["jira"] = "ok"
+            result["jira_user"] = user.get("display_name")
+        except JiraError as exc:
+            result["jira"] = f"error: {exc.message}"
+    result["anthropic_api_key"] = "set" if settings.anthropic_api_key else "missing"
+    return result
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest) -> ChatResponse:
+    if state.get("jira") is None:
+        raise HTTPException(status_code=503, detail="Jira client is not configured.")
+
+    session_id, agent = _get_agent(request.session_id)
+    try:
+        result = await agent.chat(request.message.strip())
+    except anthropic.AuthenticationError:
+        raise HTTPException(status_code=502, detail="Claude rejected the API key. Check ANTHROPIC_API_KEY.")
+    except anthropic.RateLimitError:
+        raise HTTPException(status_code=429, detail="Claude is rate limiting. Try again shortly.")
+    except anthropic.APIStatusError as exc:
+        logger.exception("Claude API error")
+        raise HTTPException(status_code=502, detail=f"Claude API error ({exc.status_code}).")
+    except anthropic.APIConnectionError:
+        raise HTTPException(status_code=502, detail="Could not reach the Claude API.")
+
+    return ChatResponse(
+        session_id=session_id,
+        reply=result.reply,
+        tool_calls=[ToolCallOut(**asdict(call)) for call in result.tool_calls],
+    )
+
+
+@app.post("/api/reset")
+async def reset(request: SessionRequest | None = None) -> dict[str, str]:
+    session_id = request.session_id if request else None
+    if session_id:
+        sessions.pop(session_id, None)
+    return {"status": "cleared"}
+
+
+@app.exception_handler(ConfigError)
+async def config_error_handler(_request, exc: ConfigError):  # pragma: no cover - startup guard
+    raise HTTPException(status_code=500, detail=str(exc))
