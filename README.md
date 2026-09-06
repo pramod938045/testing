@@ -127,6 +127,26 @@ How it behaves:
 The bot is read-only in Slack too: it answers questions about Jira and cannot change
 anything, whoever asks.
 
+## Demo mode
+
+Every story-generator command takes `--demo`, which uses built-in sample data
+instead of Jira and returns sample Story suggestions instead of calling the AI.
+It needs no Jira settings and no `ANTHROPIC_API_KEY`, so the whole flow can be
+shown when there is no API credit, or to someone with no Jira access.
+
+```bash
+python -m storygen.main find deposit --demo      # list the sample issues
+python -m storygen.main show DEMO-1 --demo       # a sample Epic in full
+python -m storygen.main generate DEMO-7 --demo   # sample Story suggestions
+```
+
+The sample set is one Epic (`DEMO-1`, self-service account closure) and one
+Change Request (`DEMO-7`, first time deposit tracking), written in the same
+shape real issues come back in, so the same rendering code runs either way.
+Output is prefixed `[demo]` and the keys all start `DEMO-`, so it cannot be
+mistaken for real data. Tests fail if a demo run constructs a Jira client or
+calls the AI.
+
 ## Configuration
 
 Every setting is an environment variable; see `.env.example` for the full list with

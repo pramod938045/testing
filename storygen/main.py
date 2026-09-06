@@ -11,6 +11,7 @@ import sys
 import anthropic
 
 from .config import Config, ConfigError
+from .demo_data import DEMO_ISSUES, get_demo_issue, get_demo_stories
 from .generate import SYSTEM, build_prompt, generate_stories
 from .jira import Jira, JiraError, looks_like_key
 
@@ -38,7 +39,21 @@ def test_connection(config: Config) -> int:
     return 0
 
 
-def find(config: Config, query: str) -> int:
+def find(config: Config, query: str, demo: bool = False) -> int:
+    if demo:
+        matches = [
+            issue for issue in DEMO_ISSUES.values()
+            if query.strip().lower() in (issue["summary"] + issue["description"]).lower()
+            or query.strip().upper() == issue["key"]
+        ]
+        print(f"[demo] {len(matches)} sample match(es) for {query!r}:")
+        for issue in matches or DEMO_ISSUES.values():
+            if not matches:
+                print("  (no match — here is the full sample set)")
+                matches = True
+            print(f"  {issue['key']:<12} {issue['type']:<16} {issue['status']:<14} {issue['summary']}")
+        return 0
+
     config.check_jira()
     jira = Jira(config.jira_url, config.jira_email, config.jira_token)
     try:
@@ -63,13 +78,20 @@ def find(config: Config, query: str) -> int:
         jira.close()
 
 
-def show(config: Config, key: str) -> int:
-    config.check_jira()
-    jira = Jira(config.jira_url, config.jira_email, config.jira_token)
-    try:
-        issue = jira.get_context(key.strip().upper())
-    finally:
-        jira.close()
+def show(config: Config, key: str, demo: bool = False) -> int:
+    if demo:
+        issue = get_demo_issue(key)
+        if issue is None:
+            print(f"No sample issue {key.upper()}. Try: {', '.join(DEMO_ISSUES)}")
+            return 1
+        print("[demo] sample data — not from Jira\n")
+    else:
+        config.check_jira()
+        jira = Jira(config.jira_url, config.jira_email, config.jira_token)
+        try:
+            issue = jira.get_context(key.strip().upper())
+        finally:
+            jira.close()
 
     print(f"{issue['key']}  [{issue['type']} / {issue['status']}]  {issue['url']}")
     print(f"Summary: {issue['summary']}")
@@ -128,21 +150,29 @@ def _render(key: str, result: dict) -> str:
     return "\n".join(lines)
 
 
-def generate(config: Config, key: str, save: str | None) -> int:
-    config.check_jira()
-    config.check_ai()
+def generate(config: Config, key: str, save: str | None, demo: bool = False) -> int:
+    if demo:
+        context = get_demo_issue(key)
+        result = get_demo_stories(key)
+        if context is None or result is None:
+            print(f"No sample issue {key.upper()}. Try: {', '.join(DEMO_ISSUES)}")
+            return 1
+        print("[demo] sample issue and sample suggestions — no Jira, no AI call\n")
+    else:
+        config.check_jira()
+        config.check_ai()
 
-    jira = Jira(config.jira_url, config.jira_email, config.jira_token)
-    try:
-        context = jira.get_context(key.strip().upper())
-    finally:
-        jira.close()
+        jira = Jira(config.jira_url, config.jira_email, config.jira_token)
+        try:
+            context = jira.get_context(key.strip().upper())
+        finally:
+            jira.close()
 
-    if not context["description"]:
-        print(f"Warning: {context['key']} has no description — suggestions will be thin.\n")
+        if not context["description"]:
+            print(f"Warning: {context['key']} has no description — suggestions will be thin.\n")
 
-    print(f"Reading {context['key']} and asking {config.model}… (this takes a few seconds)\n")
-    result = generate_stories(context, config.anthropic_key, config.model)
+        print(f"Reading {context['key']} and asking {config.model}… (this takes a few seconds)\n")
+        result = generate_stories(context, config.anthropic_key, config.model)
 
     text = _render(context["key"], result)
     print(text)
@@ -154,19 +184,25 @@ def generate(config: Config, key: str, save: str | None) -> int:
     return 0
 
 
-def prompt(config: Config, key: str, save: str | None) -> int:
+def prompt(config: Config, key: str, save: str | None, demo: bool = False) -> int:
     """Print the exact prompt to paste into any AI chat.
 
     No API key needed — this is the escape hatch when API access isn't
     available: the tool still does the Jira reading and the prompt writing,
     and you paste the result into whichever assistant you already have.
     """
-    config.check_jira()
-    jira = Jira(config.jira_url, config.jira_email, config.jira_token)
-    try:
-        context = jira.get_context(key.strip().upper())
-    finally:
-        jira.close()
+    if demo:
+        context = get_demo_issue(key)
+        if context is None:
+            print(f"No sample issue {key.upper()}. Try: {', '.join(DEMO_ISSUES)}")
+            return 1
+    else:
+        config.check_jira()
+        jira = Jira(config.jira_url, config.jira_email, config.jira_token)
+        try:
+            context = jira.get_context(key.strip().upper())
+        finally:
+            jira.close()
 
     text = f"{SYSTEM}\n\n---\n\n{build_prompt(context)}"
 
@@ -201,6 +237,13 @@ def main(argv: list[str] | None = None) -> int:
     prompt_cmd.add_argument("key", help="Issue key, e.g. DFE-9067")
     prompt_cmd.add_argument("--save", metavar="FILE", help="Write the prompt to a file instead")
 
+    for sub in (find_cmd, show_cmd, gen_cmd, prompt_cmd):
+        sub.add_argument(
+            "--demo",
+            action="store_true",
+            help="Use built-in sample data — no Jira and no API key needed",
+        )
+
     args = parser.parse_args(argv)
     config = Config.load()
 
@@ -208,13 +251,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "test-connection":
             return test_connection(config)
         if args.command == "find":
-            return find(config, args.query)
+            return find(config, args.query, args.demo)
         if args.command == "show":
-            return show(config, args.key)
+            return show(config, args.key, args.demo)
         if args.command == "generate":
-            return generate(config, args.key, args.save)
+            return generate(config, args.key, args.save, args.demo)
         if args.command == "prompt":
-            return prompt(config, args.key, args.save)
+            return prompt(config, args.key, args.save, args.demo)
     except (ConfigError, JiraError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
