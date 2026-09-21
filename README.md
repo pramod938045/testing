@@ -160,12 +160,13 @@ anything, whoever asks.
 | --- | --- | --- |
 | `UPAMCORE-30728` | Full issue: summary, description, status, assignee, type, parent, links, subtasks | `GET /issue/{key}` |
 | *what's the status?* | Answers from the issue already fetched | none |
+| *explain UPAMCORE-30728* | Interprets the issue: what blocks it, subtask progress, staleness, and what the ticket is **missing** | `GET /issue/{key}` |
 | *provide the CR ticket for this story* | Looks up parent, links and subtasks, and keeps the ones Jira **types** as a Change Request | `POST /search` — `key in (…)` |
 | *what stories are under this epic?* | Real child issues | `POST /search` — `"Epic Link" = K`, else `parent = K` |
 | *what's assigned to me and not done?* | Translates to JQL | `POST /search` |
 | *show bugs updated in the last 7 days* | Translates to JQL | `POST /search` |
 | *what is blocked right now?* | Tries each meaning of "blocked" | `POST /search` |
-| *summarise the current sprint* | Real active sprint, grouped by status and assignee | Agile `board` → `sprint` → `sprint/{id}/issue` |
+| *summarise the current sprint* | Real active sprint, grouped by status and assignee | Agile `board` → `sprint` → `sprint/{id}/issue`, falling back to `sprint in openSprints()` |
 | `jql: project = DFE AND …` | Runs your JQL verbatim | `POST /search` |
 
 Two things make this work without an AI. **Scope is decided before content**:

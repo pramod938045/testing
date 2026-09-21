@@ -14,6 +14,7 @@ the rest of the app.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from . import jira_query
@@ -47,6 +48,11 @@ WANTS_EPIC_CHILDREN = re.compile(
     re.I,
 )
 WANTS_SPRINT = re.compile(r"\bsprint\b|\bstandup\b|\bstand-up\b", re.I)
+WANTS_EXPLAIN = re.compile(
+    r"\bexplain\b|\bwalk me through\b|\bin detail\b|\bthoroughl?y\b|\bbreak ?down\b|"
+    r"\bin full\b|\bwhat.{0,12}\bactually\b.{0,12}\bmean|\btell me everything\b",
+    re.I,
+)
 WANTS_PROJECTS = re.compile(
     r"(?:what|which|list|show|see)\b[^?]*\bprojects?\b|\bprojects? can i\b", re.I
 )
@@ -59,6 +65,8 @@ HELP = (
     "- **Fetch an issue** — type its issue key, e.g. `UPAMCORE-30728`\n"
     "- **Follow up on it** — *what's the status?*, *who is it assigned to?*, "
     "*show the description*, *show the comments*\n"
+    "- **Explain it thoroughly** — *explain UPAMCORE-30728* — state, blockers, "
+    "subtask progress and what the ticket is missing\n"
     "- **Find its Change Request** — *provide the CR ticket for this story*\n"
     "- **List an epic's children** — *what stories are under this epic?*\n"
     "- **Search** — *what's assigned to me and not done?*, "
@@ -128,6 +136,156 @@ def render_issue(issue: dict[str, Any]) -> str:
         lines += ["", f"**Comments:** {len(issue['comments'])} — ask to see them"]
 
     lines += ["", issue.get("url", "")]
+    return "\n".join(lines)
+
+
+def _age_in_days(timestamp: str) -> int | None:
+    """Whole days since a Jira timestamp, or None if it cannot be read."""
+    if not timestamp:
+        return None
+    try:
+        when = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max((datetime.now(timezone.utc) - when).days, 0)
+
+
+def _split_links(links: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group links by what they mean for the work, not by link type name.
+
+    "is blocked by" is the only relation that changes what you can do next, so
+    it is worth separating from the rest rather than listing all links flat.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {"blocked_by": [], "blocks": [], "other": []}
+    for link in links:
+        relation = (link.get("relation") or "").lower()
+        if "is blocked by" in relation or "is caused by" in relation:
+            groups["blocked_by"].append(link)
+        elif relation.startswith("blocks") or "causes" in relation:
+            groups["blocks"].append(link)
+        else:
+            groups["other"].append(link)
+    return groups
+
+
+def explain_issue(issue: dict[str, Any], comment_limit: int = 3) -> str:
+    """A thorough explanation of one issue: what it is, where it sits, what
+    state it is in, what is holding it up, and what the ticket is missing.
+
+    Everything is read off the Jira response — this interprets the fields
+    rather than adding knowledge. The "gaps" section is the point: a ticket
+    with no description or no assignee is the common reason work stalls, and
+    a field dump does not make that visible.
+    """
+    key = issue["key"]
+    kind = issue.get("type") or "issue"
+    lines = [f"## {key} — {issue.get('summary') or '(no summary)'}", ""]
+
+    # --- 1. what kind of thing this is, and where it sits ------------------
+    place = [f"A **{kind}**"]
+    if issue.get("project"):
+        place.append(f"in the **{issue['project']}** project")
+    if issue.get("parent"):
+        place.append(f"under parent **{issue['parent']}**")
+    lines += [" ".join(place) + ".", ""]
+
+    # --- 2. current state ---------------------------------------------------
+    status = issue.get("status") or "unknown"
+    category = issue.get("status_category") or ""
+    state = [f"**Status:** {status}" + (f" _({category})_" if category and category != status else "")]
+    assignee = issue.get("assignee")
+    state.append(
+        f"**Assignee:** {assignee}" if assignee and assignee != "Unassigned"
+        else "**Assignee:** nobody — unassigned"
+    )
+    if issue.get("priority"):
+        state.append(f"**Priority:** {issue['priority']}")
+    if issue.get("resolution"):
+        state.append(f"**Resolution:** {issue['resolution']}")
+    if issue.get("reporter"):
+        state.append(f"**Raised by:** {issue['reporter']}")
+    lines += ["### Where it stands", ""] + [f"- {item}" for item in state]
+
+    age, idle = _age_in_days(issue.get("created", "")), _age_in_days(issue.get("updated", ""))
+    if age is not None:
+        timeline = f"- **Age:** opened {age} day(s) ago"
+        if idle is not None:
+            timeline += f", last touched {idle} day(s) ago"
+            if idle >= 14 and (category or "").lower() != "done":
+                timeline += " — **stale**"
+        lines.append(timeline)
+    if issue.get("due_date"):
+        lines.append(f"- **Due:** {issue['due_date']}")
+    lines.append("")
+
+    # --- 3. what is holding it up ------------------------------------------
+    groups = _split_links(issue.get("links") or [])
+    if groups["blocked_by"]:
+        lines += ["### What is blocking it", ""]
+        lines += [
+            f"- **{link['key']}** — {link['summary']} _({link['status']})_"
+            for link in groups["blocked_by"]
+        ]
+        lines.append("")
+    if groups["blocks"]:
+        lines += ["### What it is blocking", ""]
+        lines += [
+            f"- **{link['key']}** — {link['summary']} _({link['status']})_"
+            for link in groups["blocks"]
+        ]
+        lines.append("")
+    if groups["other"]:
+        lines += ["### Related issues", ""]
+        lines += [
+            f"- {link['relation']} **{link['key']}** — {link['summary']} _({link['status']})_"
+            for link in groups["other"]
+        ]
+        lines.append("")
+
+    # --- 4. the work broken down -------------------------------------------
+    subtasks = issue.get("subtasks") or []
+    if subtasks:
+        done = sum(1 for sub in subtasks if (sub.get("status") or "").lower() in ("done", "closed", "resolved"))
+        lines += [f"### Subtasks ({done} of {len(subtasks)} done)", ""]
+        lines += [
+            f"- **{sub['key']}** — {sub['summary']} _({sub.get('status') or '?'})_"
+            for sub in subtasks
+        ]
+        lines.append("")
+
+    # --- 5. what the ticket actually says ----------------------------------
+    description = (issue.get("description") or "").strip()
+    lines += ["### What the ticket says", ""]
+    lines.append(_truncate(description) if description else "_The description is empty in Jira._")
+    lines.append("")
+
+    # --- 6. the conversation ------------------------------------------------
+    comments = issue.get("comments") or []
+    if comments:
+        lines += [f"### Latest discussion ({len(comments)} comment(s))", ""]
+        for comment in comments[-comment_limit:]:
+            lines.append(f"**{comment['author']}** · {(comment.get('created') or '')[:10]}")
+            lines.append(_truncate(comment["body"], 500))
+            lines.append("")
+
+    # --- 7. what is missing -------------------------------------------------
+    gaps = []
+    if not description:
+        gaps.append("no description, so the intent is not written down anywhere")
+    if not assignee or assignee == "Unassigned":
+        gaps.append("nobody is assigned")
+    if not issue.get("priority"):
+        gaps.append("no priority set")
+    if idle is not None and idle >= 14 and (category or "").lower() != "done":
+        gaps.append(f"untouched for {idle} days while not done")
+    if not (issue.get("links") or subtasks):
+        gaps.append("no links or subtasks, so nothing records what it depends on")
+    if gaps:
+        lines += ["### Gaps in this ticket", ""] + [f"- {gap}" for gap in gaps] + [""]
+
+    lines.append(issue.get("url", ""))
     return "\n".join(lines)
 
 
@@ -345,6 +503,8 @@ class JiraDirectAgent:
             return await self._epic_children(keys)
         if WANTS_PROJECTS.search(message):
             return await self._list_projects()
+        if WANTS_EXPLAIN.search(message):
+            return await self._explain(keys)
 
         # A bare key means "show me this issue", not "search for it".
         if keys:
@@ -498,6 +658,13 @@ class JiraDirectAgent:
             )
         return "\n".join(lines), calls
 
+    async def _explain(self, keys: list[str]) -> tuple[str, list[ToolCallRecord]]:
+        """Explain an issue thoroughly, rather than listing its fields."""
+        issue, calls, problem = await self._subject(keys)
+        if issue is None:
+            return problem, calls
+        return explain_issue(issue), calls
+
     async def _epic_children(self, keys: list[str]) -> tuple[str, list[ToolCallRecord]]:
         """The real child issues of an epic, from Jira's own link fields."""
         key = keys[0] if keys else ""
@@ -548,19 +715,24 @@ class JiraDirectAgent:
                 ToolCallRecord("list_boards", {"project": project}, True, f'{{"count": {len(boards)}}}')
             )
         except JiraError as exc:
-            return (
-                f"Could not read boards for **{project}**:\n\n> {exc.message}\n\n"
-                "Sprints come from Jira's Agile API — if this Jira has no Agile/Software "
-                "licence, or the account cannot see the board, sprint data is unavailable.",
-                [ToolCallRecord("list_boards", {"project": project}, False, exc.message[:200])],
+            note = (
+                f"The Agile API would not list boards for **{project}**:\n\n> {exc.message}\n\n"
+                "Falling back to JQL, which needs no board access:\n\n"
             )
+            reply, search_calls = await self._open_sprint_issues(project)
+            return note + reply, [
+                ToolCallRecord("list_boards", {"project": project}, False, exc.message[:200]),
+                *search_calls,
+            ]
 
         if not boards:
-            return (
-                f"**{project}** has no board your account can see, so there is no sprint "
-                "to summarise. Sprints belong to boards, not to projects.",
-                calls,
+            note = (
+                f"**{project}** has no board your account can see, and sprints belong to "
+                "boards rather than projects — so there is no sprint *report* to read. "
+                "Jira's `openSprints()` JQL function works without a board, though:\n\n"
             )
+            reply, search_calls = await self._open_sprint_issues(project)
+            return note + reply, calls + search_calls
 
         for board in boards:
             try:
@@ -585,13 +757,25 @@ class JiraDirectAgent:
         try:
             report = await self.jira.sprint_report(sprint["id"])
         except JiraError as exc:
-            return f"Could not read sprint **{sprint['name']}**:\n\n> {exc.message}", calls
+            note = f"Could not read sprint **{sprint['name']}**:\n\n> {exc.message}\n\n"
+            reply, search_calls = await self._open_sprint_issues(project)
+            return note + reply, calls + search_calls
         calls.append(
             ToolCallRecord(
                 "sprint_report", {"sprint_id": sprint["id"]}, True, f'{{"total": {report["total"]}}}'
             )
         )
         return render_sprint(sprint, report), calls
+
+    async def _open_sprint_issues(self, project: str) -> tuple[str, list[ToolCallRecord]]:
+        """Running sprint work via JQL instead of the Agile API.
+
+        `sprint in openSprints()` is a built-in Jira function that reads the
+        issues' own sprint field, so it works when the board is invisible to
+        this account or the Agile API is unavailable. It gives the issues, not
+        the burndown — Jira's own Sprint Report is still the place for that.
+        """
+        return await self._run(jira_query.open_sprint(project))
 
     async def _list_projects(self) -> tuple[str, list[ToolCallRecord]]:
         """Which projects this account can see — the fastest way to find a key prefix."""

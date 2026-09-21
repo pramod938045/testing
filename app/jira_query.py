@@ -194,6 +194,22 @@ def build(text: str, default_project: str = "") -> Query | None:
     )
 
 
+# --- sprints without a board -------------------------------------------------
+
+# `openSprints()` is one of Jira's own JQL functions and reads the issues' own
+# sprint field, so it needs no board access and no Agile API. Ordering by
+# status groups a standup list the way people read it.
+def open_sprint(project: str) -> Query:
+    scope = f"project = {project} AND " if project else ""
+    return Query(
+        candidates=[
+            f"{scope}sprint in openSprints() ORDER BY status ASC, updated DESC",
+            f"{scope}sprint in openSprints()",
+        ],
+        label=f"in {project}'s running sprint" if project else "in the running sprint",
+    )
+
+
 # --- epic children ----------------------------------------------------------
 
 # Company-managed epics on Data Center use the "Epic Link" custom field;

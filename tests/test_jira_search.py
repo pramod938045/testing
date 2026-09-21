@@ -429,15 +429,21 @@ async def test_the_sprint_summary_uses_the_real_active_sprint():
     assert "/rest/agile/1.0/sprint/445/issue" in jira.paths
 
 
-async def test_no_board_explains_rather_than_showing_an_empty_sprint():
+async def test_no_board_explains_and_falls_back_to_open_sprints_jql():
+    """`openSprints()` reads the issues' own sprint field, so it still works."""
     jira = Agile([], [], [])
+    jira.routes = {"openSprints": issues(
+        issue_row("UPAMCORE-30727", "Route feedback", "Story", status="In Progress")
+    )}
     agent = jira.agent()
     await agent.chat("UPAMCORE-30727")
 
     result = await agent.chat("summarise the current sprint")
 
-    assert "no board" in result.reply
-    assert "Sprints belong to boards" in result.reply
+    assert "no board your account can see" in result.reply
+    assert "sprints belong to boards" in result.reply
+    assert "UPAMCORE-30727" in result.reply, "the running work is still listed"
+    assert "sprint in openSprints()" in jira.searches[0]
 
 
 async def test_no_active_sprint_names_the_boards_checked():
@@ -512,3 +518,92 @@ async def test_nothing_in_this_flow_writes_to_jira():
     assert all(
         path.endswith("/search") for path, method in zip(jira.paths, methods) if method == "POST"
     ), "POST is only ever search"
+
+
+# --- explaining one ticket thoroughly ---------------------------------------
+
+STALE = {
+    "key": "UPAMCORE-30727",
+    "fields": {
+        "summary": "Route fund collection feedback to the Java service",
+        "issuetype": {"name": "Story"},
+        "status": {"name": "In Progress", "statusCategory": {"name": "In Progress"}},
+        "project": {"name": "UPAM Core", "key": "UPAMCORE"},
+        "assignee": None,
+        "reporter": {"displayName": "Rayanagoudra, Pramod"},
+        "created": "2026-06-01T09:00:00.000+0000",
+        "updated": "2026-06-02T09:00:00.000+0000",
+        "description": "",
+        "parent": {"key": "UPAMCORE-30000"},
+        "issuelinks": [
+            {"type": {"inward": "is blocked by"},
+             "inwardIssue": {"key": "UPAMCORE-31765", "fields": {
+                 "summary": "subscriptions-funding:17.35.0", "status": {"name": "Built"}}}},
+        ],
+        "subtasks": [
+            {"key": "UPAMCORE-30728", "fields": {"summary": "Add the env switch",
+                                                 "status": {"name": "Done"}}},
+            {"key": "UPAMCORE-30729", "fields": {"summary": "Wire the endpoint",
+                                                 "status": {"name": "To Do"}}},
+        ],
+    },
+}
+
+
+async def test_explaining_a_ticket_separates_what_blocks_it():
+    jira = Jira({}, issue=STALE)
+    agent = jira.agent()
+
+    result = await agent.chat("explain UPAMCORE-30727 thoroughly")
+
+    assert "What is blocking it" in result.reply
+    assert "UPAMCORE-31765" in result.reply
+
+
+async def test_explaining_a_ticket_counts_subtask_progress():
+    jira = Jira({}, issue=STALE)
+    agent = jira.agent()
+
+    result = await agent.chat("explain this ticket in detail")
+    assert "Which issue do you mean" in result.reply, "no issue open yet"
+
+    await agent.chat("UPAMCORE-30727")
+    result = await agent.chat("explain this ticket in detail")
+
+    assert "Subtasks (1 of 2 done)" in result.reply
+
+
+async def test_explaining_a_ticket_names_its_gaps():
+    """The point of explaining rather than dumping fields."""
+    jira = Jira({}, issue=STALE)
+    agent = jira.agent()
+
+    result = await agent.chat("explain UPAMCORE-30727")
+
+    assert "Gaps in this ticket" in result.reply
+    assert "no description" in result.reply
+    assert "nobody is assigned" in result.reply
+    assert "untouched for" in result.reply and "stale" in result.reply
+
+
+async def test_a_complete_ticket_is_not_accused_of_missing_things():
+    """STORY has a description, an assignee and links — only priority is unset."""
+    jira = Jira({})
+    agent = jira.agent()
+
+    result = await agent.chat("explain UPAMCORE-30727 thoroughly")
+
+    assert "no description" not in result.reply
+    assert "nobody is assigned" not in result.reply
+    assert "no links or subtasks" not in result.reply
+    assert "no priority set" in result.reply, "the one real gap is reported"
+    assert "Related issues" in result.reply, "links that are not blockers are still shown"
+
+
+async def test_explain_does_not_hijack_a_plain_key_lookup():
+    jira = Jira({})
+    agent = jira.agent()
+
+    result = await agent.chat("UPAMCORE-30727")
+
+    assert "## UPAMCORE-30727" not in result.reply, "the field view, not the explanation"
