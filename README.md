@@ -53,6 +53,10 @@ Center, which is what a `403` from a self-hosted site usually means. One
 running instance talks to one site — point `JIRA_BASE_URL` at whichever holds
 the issues you want.
 
+This applies to the chatbot and the story generator alike. `test-connection`
+prints which deployment and API version it resolved, so a misdetected site
+shows up immediately rather than as a confusing `404`.
+
 ## Setup
 
 Requires Python 3.11+.
@@ -190,6 +194,143 @@ Nothing is hardcoded and nothing is written.
 The response says which mode answered, and the page shows a banner for each, so
 it can never be unclear whether data is real.
 
+## Using it from Claude Code (MCP server)
+
+`storygen.mcp_server` exposes the Jira reading over MCP, so a Claude Code
+session on your own machine can read a ticket by key instead of being handed
+pasted text:
+
+> *write manual test cases for UPAMCORE-29249*
+
+It runs locally, so it works with a self-hosted Jira that a hosted assistant
+cannot reach, and the Jira token stays in your `.env` on your machine.
+
+### Setting it up
+
+```bash
+pip install -r requirements.txt     # brings in mcp>=2.0
+```
+
+The repo ships a `.mcp.json`, so opening this directory in Claude Code offers
+the server and you approve it once. To register it from anywhere instead:
+
+```bash
+claude mcp add jira -- python -m storygen.mcp_server
+```
+
+Check it with `/mcp` in Claude Code, which should list six tools.
+
+### The tools
+
+| Tool | Does |
+| --- | --- |
+| `jira_issue` | One issue in full |
+| `jira_epic` | An epic plus every story under it |
+| `jira_find` | Search Epics and Change Requests by text |
+| `jira_test_case_brief` | The ticket, the QA rules and the return schema |
+| `test_cases_to_csv` | Test cases as Xray/Zephyr/TestRail CSV |
+| `jira_publish_test_cases` | Post them back to Jira |
+
+`jira_test_case_brief` hands Claude the ticket and the rules and lets Claude
+write the test cases itself, so the server needs no `ANTHROPIC_API_KEY` — the
+session you are already in does the work.
+
+### Writing is off until you turn it on
+
+Five of the six tools cannot write; the sixth has three gates in front of it.
+
+1. **The server refuses.** Writing needs `STORYGEN_MCP_ALLOW_WRITES=1` in the
+   server's environment. Unset, `jira_publish_test_cases` returns a refusal
+   and never opens a connection. A model cannot set an environment variable,
+   so this gate is not one it can talk its way past.
+2. **Preview by default.** `dry_run` is `true` unless explicitly set false, and
+   a preview returns the exact text that would be posted, plus whether writing
+   is even enabled.
+3. **Your client asks.** The tool is annotated destructive, so Claude Code
+   prompts you with the arguments before each call.
+
+To allow writing, set the variable where the server runs — in `.mcp.json`:
+
+```json
+{ "mcpServers": { "jira": {
+    "command": "python",
+    "args": ["-m", "storygen.mcp_server"],
+    "env": { "STORYGEN_MCP_ALLOW_WRITES": "1" }
+} } }
+```
+
+Even then the only thing that can be written is rendered test cases, as a
+comment or as sub-tasks. There is deliberately no general "edit this issue"
+tool, and the read client still refuses every non-GET request.
+
+## An epic and its stories, as one document
+
+`storygen epic` reads an epic, finds the stories under it, and prints both —
+the epic in full, a table of its children, then each story's own description,
+subtasks and links.
+
+```bash
+python -m storygen.main epic UPAMCORE-29249                  # print it
+python -m storygen.main epic UPAMCORE-29249 --save epic.md   # one file
+python -m storygen.main epic UPAMCORE-29249 --brief          # table only
+```
+
+Sites disagree about which field ties a story to its epic, so it tries
+`"Epic Link"`, then `parent`, then `"Parent Link"`, and reports which one
+worked. A field the site does not have is skipped; an epic where *every*
+candidate is rejected raises rather than claiming the epic is empty, because
+those two cases are not the same thing.
+
+`--save` exists for handing the whole epic to someone — or something — that
+cannot reach Jira itself: one self-contained Markdown file with every story's
+text in it.
+
+## Manual test cases from a ticket
+
+`storygen testcases` reads an issue and writes the manual test cases for it —
+steps, expected results, preconditions, test data, and the requirement each
+case traces back to. Negative and boundary cases are included wherever the
+ticket states a rule; anything the ticket leaves unclear becomes an open
+question instead of a guess, and anything that cannot be checked by hand is
+listed separately rather than dressed up as a test.
+
+```bash
+python -m storygen.main testcases DFE-9067                  # print them
+python -m storygen.main testcases DFE-9067 --save tc.md     # Markdown
+python -m storygen.main testcases DFE-9067 --csv tc.csv     # Xray/Zephyr/TestRail
+python -m storygen.main testcases DEMO-1 --demo             # no Jira, no API key
+```
+
+The CSV is one row per step, with the case-level columns repeated on each row
+— the shape Xray, Zephyr and TestRail all import.
+
+### Writing them back to Jira
+
+Nothing reaches Jira unless you add `--post`, and `--post` still asks. It
+prints the site, the issue, exactly what will be created and how to undo it,
+then waits for you to type `yes`. Anything else — `y`, a blank line, Ctrl-D —
+is a no, and nothing is written.
+
+```bash
+python -m storygen.main testcases DFE-9067 --post              # one comment
+python -m storygen.main testcases DFE-9067 --post --as subtasks # one issue each
+```
+
+A comment is the default because it is reversible by one person deleting it.
+Sub-tasks are not: deleting an issue needs a Jira permission most accounts do
+not have, so the preview says so before you agree. If a sub-task run fails
+partway, the ones already created are listed — they stay in Jira.
+
+`--yes` skips the prompt for scripted runs. It only does anything alongside
+`--post`.
+
+The read client cannot write at all: `storygen.jira.Jira` rejects every
+non-GET request before it is sent, and that is unchanged. Writing lives in
+`storygen/publish.py`, in a separate class, where every entry point takes
+`confirmed` and raises `NotConfirmed` unless it is `True` — so no code path
+reaches Jira by forgetting a flag. Tests assert the gate holds: a declined
+prompt that wrote anything fails the suite.
+
 ## Demo mode
 
 Every story-generator command takes `--demo`, which uses built-in sample data
@@ -201,6 +342,7 @@ shown when there is no API credit, or to someone with no Jira access.
 python -m storygen.main find deposit --demo      # list the sample issues
 python -m storygen.main show DEMO-1 --demo       # a sample Epic in full
 python -m storygen.main generate DEMO-7 --demo   # sample Story suggestions
+python -m storygen.main testcases DEMO-1 --demo  # sample manual test cases
 ```
 
 The chat UI has the same thing at **http://localhost:8000/?demo** — a working

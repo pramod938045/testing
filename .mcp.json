@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "jira": {
+      "command": "python",
+      "args": ["-m", "storygen.mcp_server"],
+      "env": {}
+    }
+  }
+}

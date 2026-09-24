@@ -247,6 +247,141 @@ DEMO_STORIES: dict[str, dict[str, Any]] = {
 }
 
 
+# Matches the shape `generate_test_cases()` returns, so the same rendering,
+# CSV export and Jira preview code runs in demo mode.
+DEMO_TEST_CASES: dict[str, dict[str, Any]] = {
+    "DEMO-1": {
+        "test_cases": [
+            {
+                "id": "TC-01",
+                "title": "Account closure is reachable from Account Settings on web",
+                "type": "Functional",
+                "priority": "High",
+                "covers": "Closure must be reachable from Account Settings on web and mobile web",
+                "preconditions": ["A logged-in player with a zero balance and no open bonus"],
+                "test_data": "",
+                "steps": [
+                    {
+                        "action": "Log in to the website and open Account Settings.",
+                        "expected": "Account Settings opens and a 'Close account' option is visible.",
+                    },
+                    {
+                        "action": "Select 'Close account'.",
+                        "expected": "The closure flow starts and explains what closing does.",
+                    },
+                ],
+                "expected_result": "A player can reach the closure flow from Account Settings on web.",
+            },
+            {
+                "id": "TC-02",
+                "title": "Account closure is reachable from Account Settings on mobile web",
+                "type": "Functional",
+                "priority": "High",
+                "covers": "Closure must be reachable from Account Settings on web and mobile web",
+                "preconditions": ["A logged-in player on a mobile browser"],
+                "test_data": "",
+                "steps": [
+                    {
+                        "action": "Log in on a mobile browser and open Account Settings.",
+                        "expected": "A 'Close account' option is visible and tappable.",
+                    }
+                ],
+                "expected_result": "The closure entry point is present on mobile web too.",
+            },
+            {
+                "id": "TC-03",
+                "title": "Closure requires a second confirmation step",
+                "type": "Functional",
+                "priority": "High",
+                "covers": "The player must confirm in a second step before anything happens",
+                "preconditions": ["A logged-in player eligible to close"],
+                "test_data": "",
+                "steps": [
+                    {
+                        "action": "Start the closure flow and proceed to the confirmation step.",
+                        "expected": "A confirmation step is shown before closure happens.",
+                    },
+                    {
+                        "action": "Abandon the flow without confirming, then reload the account page.",
+                        "expected": "The account is still open and fully usable.",
+                    },
+                ],
+                "expected_result": "Nothing changes until the player confirms in the second step.",
+            },
+            {
+                "id": "TC-04",
+                "title": "Closure is blocked while a balance remains",
+                "type": "Negative",
+                "priority": "High",
+                "covers": "Any remaining balance must be withdrawn before closure can proceed",
+                "preconditions": ["A logged-in player with a non-zero balance"],
+                "test_data": "Account balance greater than zero",
+                "steps": [
+                    {
+                        "action": "Start the closure flow.",
+                        "expected": "Closure is refused and the player is told to withdraw first.",
+                    },
+                    {
+                        "action": "Withdraw the full balance, then start the closure flow again.",
+                        "expected": "Closure is now allowed to proceed.",
+                    },
+                ],
+                "expected_result": "A player cannot close an account that still holds funds.",
+            },
+            {
+                "id": "TC-05",
+                "title": "Player with an open bonus is warned it will be forfeited",
+                "type": "Functional",
+                "priority": "Medium",
+                "covers": "A player with an open bonus must be warned that the bonus will be forfeited",
+                "preconditions": ["A logged-in player with a zero balance and one open bonus"],
+                "test_data": "One active bonus on the account",
+                "steps": [
+                    {
+                        "action": "Start the closure flow.",
+                        "expected": "A warning states that the open bonus will be forfeited.",
+                    }
+                ],
+                "expected_result": "The forfeiture warning is shown before the player confirms.",
+            },
+            {
+                "id": "TC-06",
+                "title": "Closed account cannot log in, deposit or receive marketing",
+                "type": "Negative",
+                "priority": "High",
+                "covers": "Closed accounts must not be able to log in, deposit or receive marketing",
+                "preconditions": ["An account that has completed the closure flow"],
+                "test_data": "The closed account's credentials",
+                "steps": [
+                    {
+                        "action": "Attempt to log in with the closed account's credentials.",
+                        "expected": "Login is refused.",
+                    },
+                    {
+                        "action": "Check that a confirmation email was received for the closure.",
+                        "expected": "A closure confirmation email is present.",
+                    },
+                    {
+                        "action": "Trigger the next marketing send for the player's segment.",
+                        "expected": "The closed account is not included.",
+                    },
+                ],
+                "expected_result": "A closed account is inert: no login, no deposit, no marketing.",
+            },
+        ],
+        "open_questions": [
+            "What exact message should a player with a remaining balance see?",
+            "Can a closed account be reopened, and by whom?",
+            "How soon after closure must the confirmation email arrive?",
+        ],
+        "not_manually_testable": [
+            "Deposit rejection for a closed account may need an API-level check if the "
+            "deposit UI is unreachable once login is blocked."
+        ],
+    },
+}
+
+
 def demo_keys() -> list[str]:
     return list(DEMO_ISSUES)
 
@@ -257,3 +392,7 @@ def get_demo_issue(key: str) -> dict[str, Any] | None:
 
 def get_demo_stories(key: str) -> dict[str, Any] | None:
     return DEMO_STORIES.get(key.strip().upper())
+
+
+def get_demo_test_cases(key: str) -> dict[str, Any] | None:
+    return DEMO_TEST_CASES.get(key.strip().upper())
