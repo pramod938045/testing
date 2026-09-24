@@ -193,6 +193,75 @@ Nothing is hardcoded and nothing is written.
 The response says which mode answered, and the page shows a banner for each, so
 it can never be unclear whether data is real.
 
+## Using it from Claude Code (MCP server)
+
+`storygen.mcp_server` exposes the Jira reading over MCP, so a Claude Code
+session on your own machine can read a ticket by key instead of being handed
+pasted text:
+
+> *write manual test cases for UPAMCORE-29249*
+
+It runs locally, so it works with a self-hosted Jira that a hosted assistant
+cannot reach, and the Jira token stays in your `.env` on your machine.
+
+### Setting it up
+
+```bash
+pip install -r requirements.txt     # brings in mcp>=2.0
+```
+
+The repo ships a `.mcp.json`, so opening this directory in Claude Code offers
+the server and you approve it once. To register it from anywhere instead:
+
+```bash
+claude mcp add jira -- python -m storygen.mcp_server
+```
+
+Check it with `/mcp` in Claude Code, which should list six tools.
+
+### The tools
+
+| Tool | Does |
+| --- | --- |
+| `jira_issue` | One issue in full |
+| `jira_epic` | An epic plus every story under it |
+| `jira_find` | Search Epics and Change Requests by text |
+| `jira_test_case_brief` | The ticket, the QA rules and the return schema |
+| `test_cases_to_csv` | Test cases as Xray/Zephyr/TestRail CSV |
+| `jira_publish_test_cases` | Post them back to Jira |
+
+`jira_test_case_brief` hands Claude the ticket and the rules and lets Claude
+write the test cases itself, so the server needs no `ANTHROPIC_API_KEY` — the
+session you are already in does the work.
+
+### Writing is off until you turn it on
+
+Five of the six tools cannot write; the sixth has three gates in front of it.
+
+1. **The server refuses.** Writing needs `STORYGEN_MCP_ALLOW_WRITES=1` in the
+   server's environment. Unset, `jira_publish_test_cases` returns a refusal
+   and never opens a connection. A model cannot set an environment variable,
+   so this gate is not one it can talk its way past.
+2. **Preview by default.** `dry_run` is `true` unless explicitly set false, and
+   a preview returns the exact text that would be posted, plus whether writing
+   is even enabled.
+3. **Your client asks.** The tool is annotated destructive, so Claude Code
+   prompts you with the arguments before each call.
+
+To allow writing, set the variable where the server runs — in `.mcp.json`:
+
+```json
+{ "mcpServers": { "jira": {
+    "command": "python",
+    "args": ["-m", "storygen.mcp_server"],
+    "env": { "STORYGEN_MCP_ALLOW_WRITES": "1" }
+} } }
+```
+
+Even then the only thing that can be written is rendered test cases, as a
+comment or as sub-tasks. There is deliberately no general "edit this issue"
+tool, and the read client still refuses every non-GET request.
+
 ## An epic and its stories, as one document
 
 `storygen epic` reads an epic, finds the stories under it, and prints both —

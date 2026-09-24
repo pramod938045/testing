@@ -16,6 +16,7 @@ from .demo_data import DEMO_ISSUES, get_demo_issue, get_demo_stories, get_demo_t
 from .generate import SYSTEM, build_prompt, generate_stories
 from .jira import Jira, JiraError, looks_like_key
 from .publish import JiraWriter, NotConfirmed, render_case, render_plain
+from .render import epic_document
 from .testcases import generate_test_cases, render_csv, render_markdown
 
 SUMMARY_FIELDS = ["summary", "status", "issuetype", "updated"]
@@ -234,31 +235,6 @@ def prompt(config: Config, key: str, save: str | None, demo: bool = False) -> in
     return 0
 
 
-def _issue_block(issue: dict) -> list[str]:
-    """One issue rendered for the bundle: metadata then description."""
-    lines = [
-        f"## {issue['key']} — {issue['summary']}",
-        "",
-        f"Type: {issue['type']} | Status: {issue['status']} | "
-        f"Priority: {issue.get('priority') or '—'}",
-    ]
-    if issue.get("labels"):
-        lines.append("Labels: " + ", ".join(issue["labels"]))
-    lines.append(f"URL: {issue['url']}")
-    lines += ["", "### Description", "", issue["description"] or "_(empty)_"]
-
-    if issue.get("subtasks"):
-        lines += ["", "### Subtasks", ""]
-        lines += [f"- {sub['key']} {sub['summary']}" for sub in issue["subtasks"]]
-    if issue.get("links"):
-        lines += ["", "### Linked issues", ""]
-        lines += [
-            f"- {link['relation']} {link['key']} [{link['status']}] {link['summary']}"
-            for link in issue["links"]
-        ]
-    return lines + [""]
-
-
 def epic(config: Config, key: str, save: str | None = None, brief: bool = False) -> int:
     """Read an epic and every story under it, as one document.
 
@@ -275,35 +251,7 @@ def epic(config: Config, key: str, save: str | None = None, brief: bool = False)
     finally:
         jira.close()
 
-    lines = [f"# {parent['key']} — {parent['summary']}", ""]
-    lines += _issue_block(parent)
-
-    if not children:
-        lines += [
-            "## Stories under this epic",
-            "",
-            "_None found._ The epic has no children, or this site links them by a "
-            "field other than Epic Link, parent or Parent Link.",
-            "",
-        ]
-    else:
-        lines += [f"## Stories under this epic ({len(children)})", "", f"Found with: `{jql}`", ""]
-        lines += ["| Key | Type | Status | Summary |", "| --- | --- | --- | --- |"]
-        for child in children:
-            fields = child.get("fields", {})
-            lines.append(
-                f"| {child['key']} "
-                f"| {(fields.get('issuetype') or {}).get('name', '?')} "
-                f"| {(fields.get('status') or {}).get('name', '?')} "
-                f"| {fields.get('summary', '')} |"
-            )
-        lines.append("")
-        if full:
-            lines += ["---", "", "# Stories in full", ""]
-            for story in full:
-                lines += _issue_block(story)
-
-    text = "\n".join(lines)
+    text = epic_document(parent, children, jql, full)
     print(text)
 
     if save:

@@ -8,6 +8,10 @@ python-dotenv>=1.0
 slack-bolt>=1.20
 aiohttp>=3.9
 
+# MCP server (storygen.mcp_server) — not needed for the web app, Slack or CLI.
+# v2 renamed FastMCP to MCPServer, which is the API this uses.
+mcp>=2.0
+
 # dev / test
 pytest>=8.0
 pytest-asyncio>=0.23
