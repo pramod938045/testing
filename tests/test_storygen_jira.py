@@ -34,11 +34,35 @@ def test_auth_failure_explains_which_settings_to_check():
 
 
 def test_config_lists_every_missing_setting():
+    """Cloud needs the email too, so all three names appear."""
+    with pytest.raises(ConfigError) as exc:
+        Config(
+            jira_url="https://example.atlassian.net",
+            jira_email="",
+            jira_token="",
+            anthropic_key="",
+        ).check_jira()
+
+    message = str(exc.value)
+    assert "JIRA_EMAIL" in message and "JIRA_API_TOKEN" in message
+
+
+def test_data_center_config_does_not_require_an_email():
+    """A Data Center personal access token authenticates on its own."""
+    Config(
+        jira_url="https://jira.example.com",
+        jira_email="",
+        jira_token="pat",
+        anthropic_key="",
+    ).check_jira()
+
+
+def test_missing_url_and_token_are_both_reported():
     with pytest.raises(ConfigError) as exc:
         Config(jira_url="", jira_email="", jira_token="", anthropic_key="").check_jira()
 
     message = str(exc.value)
-    assert "JIRA_BASE_URL" in message and "JIRA_EMAIL" in message and "JIRA_API_TOKEN" in message
+    assert "JIRA_BASE_URL" in message and "JIRA_API_TOKEN" in message
 
 
 def test_config_with_jira_settings_passes_without_an_ai_key():

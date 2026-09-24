@@ -53,6 +53,10 @@ Center, which is what a `403` from a self-hosted site usually means. One
 running instance talks to one site — point `JIRA_BASE_URL` at whichever holds
 the issues you want.
 
+This applies to the chatbot and the story generator alike. `test-connection`
+prints which deployment and API version it resolved, so a misdetected site
+shows up immediately rather than as a confusing `404`.
+
 ## Setup
 
 Requires Python 3.11+.
@@ -189,6 +193,52 @@ Nothing is hardcoded and nothing is written.
 The response says which mode answered, and the page shows a banner for each, so
 it can never be unclear whether data is real.
 
+## Manual test cases from a ticket
+
+`storygen testcases` reads an issue and writes the manual test cases for it —
+steps, expected results, preconditions, test data, and the requirement each
+case traces back to. Negative and boundary cases are included wherever the
+ticket states a rule; anything the ticket leaves unclear becomes an open
+question instead of a guess, and anything that cannot be checked by hand is
+listed separately rather than dressed up as a test.
+
+```bash
+python -m storygen.main testcases DFE-9067                  # print them
+python -m storygen.main testcases DFE-9067 --save tc.md     # Markdown
+python -m storygen.main testcases DFE-9067 --csv tc.csv     # Xray/Zephyr/TestRail
+python -m storygen.main testcases DEMO-1 --demo             # no Jira, no API key
+```
+
+The CSV is one row per step, with the case-level columns repeated on each row
+— the shape Xray, Zephyr and TestRail all import.
+
+### Writing them back to Jira
+
+Nothing reaches Jira unless you add `--post`, and `--post` still asks. It
+prints the site, the issue, exactly what will be created and how to undo it,
+then waits for you to type `yes`. Anything else — `y`, a blank line, Ctrl-D —
+is a no, and nothing is written.
+
+```bash
+python -m storygen.main testcases DFE-9067 --post              # one comment
+python -m storygen.main testcases DFE-9067 --post --as subtasks # one issue each
+```
+
+A comment is the default because it is reversible by one person deleting it.
+Sub-tasks are not: deleting an issue needs a Jira permission most accounts do
+not have, so the preview says so before you agree. If a sub-task run fails
+partway, the ones already created are listed — they stay in Jira.
+
+`--yes` skips the prompt for scripted runs. It only does anything alongside
+`--post`.
+
+The read client cannot write at all: `storygen.jira.Jira` rejects every
+non-GET request before it is sent, and that is unchanged. Writing lives in
+`storygen/publish.py`, in a separate class, where every entry point takes
+`confirmed` and raises `NotConfirmed` unless it is `True` — so no code path
+reaches Jira by forgetting a flag. Tests assert the gate holds: a declined
+prompt that wrote anything fails the suite.
+
 ## Demo mode
 
 Every story-generator command takes `--demo`, which uses built-in sample data
@@ -200,6 +250,7 @@ shown when there is no API credit, or to someone with no Jira access.
 python -m storygen.main find deposit --demo      # list the sample issues
 python -m storygen.main show DEMO-1 --demo       # a sample Epic in full
 python -m storygen.main generate DEMO-7 --demo   # sample Story suggestions
+python -m storygen.main testcases DEMO-1 --demo  # sample manual test cases
 ```
 
 The chat UI has the same thing at **http://localhost:8000/?demo** — a working
