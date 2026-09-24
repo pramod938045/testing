@@ -234,6 +234,85 @@ def prompt(config: Config, key: str, save: str | None, demo: bool = False) -> in
     return 0
 
 
+def _issue_block(issue: dict) -> list[str]:
+    """One issue rendered for the bundle: metadata then description."""
+    lines = [
+        f"## {issue['key']} — {issue['summary']}",
+        "",
+        f"Type: {issue['type']} | Status: {issue['status']} | "
+        f"Priority: {issue.get('priority') or '—'}",
+    ]
+    if issue.get("labels"):
+        lines.append("Labels: " + ", ".join(issue["labels"]))
+    lines.append(f"URL: {issue['url']}")
+    lines += ["", "### Description", "", issue["description"] or "_(empty)_"]
+
+    if issue.get("subtasks"):
+        lines += ["", "### Subtasks", ""]
+        lines += [f"- {sub['key']} {sub['summary']}" for sub in issue["subtasks"]]
+    if issue.get("links"):
+        lines += ["", "### Linked issues", ""]
+        lines += [
+            f"- {link['relation']} {link['key']} [{link['status']}] {link['summary']}"
+            for link in issue["links"]
+        ]
+    return lines + [""]
+
+
+def epic(config: Config, key: str, save: str | None = None, brief: bool = False) -> int:
+    """Read an epic and every story under it, as one document.
+
+    Built to be handed to someone — or something — that cannot reach Jira
+    itself: one file holding the epic and each story in full.
+    """
+    config.check_jira()
+    key = key.strip().upper()
+    jira = _jira(config)
+    try:
+        parent = jira.get_context(key)
+        children, jql = jira.find_children(key)
+        full = [] if brief else [jira.get_context(child["key"]) for child in children]
+    finally:
+        jira.close()
+
+    lines = [f"# {parent['key']} — {parent['summary']}", ""]
+    lines += _issue_block(parent)
+
+    if not children:
+        lines += [
+            "## Stories under this epic",
+            "",
+            "_None found._ The epic has no children, or this site links them by a "
+            "field other than Epic Link, parent or Parent Link.",
+            "",
+        ]
+    else:
+        lines += [f"## Stories under this epic ({len(children)})", "", f"Found with: `{jql}`", ""]
+        lines += ["| Key | Type | Status | Summary |", "| --- | --- | --- | --- |"]
+        for child in children:
+            fields = child.get("fields", {})
+            lines.append(
+                f"| {child['key']} "
+                f"| {(fields.get('issuetype') or {}).get('name', '?')} "
+                f"| {(fields.get('status') or {}).get('name', '?')} "
+                f"| {fields.get('summary', '')} |"
+            )
+        lines.append("")
+        if full:
+            lines += ["---", "", "# Stories in full", ""]
+            for story in full:
+                lines += _issue_block(story)
+
+    text = "\n".join(lines)
+    print(text)
+
+    if save:
+        with open(save, "w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+        print(f"\nSaved to {save}")
+    return 0
+
+
 def _confirm(question: str, reader: Any = input) -> bool:
     """Anything but a typed 'yes' is a no. A closed stdin is also a no."""
     try:
@@ -385,6 +464,17 @@ def main(argv: list[str] | None = None) -> int:
     prompt_cmd.add_argument("key", help="Issue key, e.g. DFE-9067")
     prompt_cmd.add_argument("--save", metavar="FILE", help="Write the prompt to a file instead")
 
+    epic_cmd = commands.add_parser(
+        "epic", help="Read an epic and every story under it, as one document"
+    )
+    epic_cmd.add_argument("key", help="Epic key, e.g. UPAMCORE-29249")
+    epic_cmd.add_argument("--save", metavar="FILE", help="Write the bundle to a Markdown file")
+    epic_cmd.add_argument(
+        "--brief",
+        action="store_true",
+        help="List the stories only, without fetching each description",
+    )
+
     tc_cmd = commands.add_parser(
         "testcases", help="Write manual test cases for an issue (asks before writing to Jira)"
     )
@@ -433,6 +523,8 @@ def main(argv: list[str] | None = None) -> int:
             return generate(config, args.key, args.save, args.demo)
         if args.command == "prompt":
             return prompt(config, args.key, args.save, args.demo)
+        if args.command == "epic":
+            return epic(config, args.key, args.save, args.brief)
         if args.command == "testcases":
             return testcases(
                 config,

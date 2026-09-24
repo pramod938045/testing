@@ -193,6 +193,28 @@ Nothing is hardcoded and nothing is written.
 The response says which mode answered, and the page shows a banner for each, so
 it can never be unclear whether data is real.
 
+## An epic and its stories, as one document
+
+`storygen epic` reads an epic, finds the stories under it, and prints both —
+the epic in full, a table of its children, then each story's own description,
+subtasks and links.
+
+```bash
+python -m storygen.main epic UPAMCORE-29249                  # print it
+python -m storygen.main epic UPAMCORE-29249 --save epic.md   # one file
+python -m storygen.main epic UPAMCORE-29249 --brief          # table only
+```
+
+Sites disagree about which field ties a story to its epic, so it tries
+`"Epic Link"`, then `parent`, then `"Parent Link"`, and reports which one
+worked. A field the site does not have is skipped; an epic where *every*
+candidate is rejected raises rather than claiming the epic is empty, because
+those two cases are not the same thing.
+
+`--save` exists for handing the whole epic to someone — or something — that
+cannot reach Jira itself: one self-contained Markdown file with every story's
+text in it.
+
 ## Manual test cases from a ticket
 
 `storygen testcases` reads an issue and writes the manual test cases for it —

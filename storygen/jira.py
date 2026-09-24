@@ -45,6 +45,10 @@ CONTEXT_FIELDS = [
 # Issue types worth generating stories from. "Change Request" doesn't exist on
 # every site, so a search that mentions it falls back to searching all types.
 PARENT_TYPES = ("Epic", "Change Request")
+# Sites disagree about which field ties a story to its epic: company-managed
+# projects on Data Center use the "Epic Link" custom field, team-managed and
+# newer Cloud projects use `parent`. Try each until one works.
+EPIC_CHILD_FIELDS = ('"Epic Link"', "parent", '"Parent Link"')
 
 
 class JiraError(RuntimeError):
@@ -220,6 +224,33 @@ class Jira:
             ],
             "url": f"{self.base_url}/browse/{issue.get('key')}",
         }
+
+    def find_children(self, key: str, limit: int = 100) -> tuple[list[dict[str, Any]], str]:
+        """The stories under an epic, and the JQL that found them.
+
+        Returns `([], "")` when the epic genuinely has no children. Raises only
+        if every candidate field was rejected, which means none of them exists
+        on this site rather than that the epic is empty.
+        """
+        fields = ["summary", "status", "issuetype", "updated"]
+        last_error: JiraError | None = None
+        any_accepted = False
+
+        for field in EPIC_CHILD_FIELDS:
+            jql = f"{field} = {key} ORDER BY created ASC"
+            try:
+                issues = self.search(jql, fields, limit)
+            except JiraError as exc:
+                # This site has no such field; try the next way of linking.
+                last_error = exc
+                continue
+            any_accepted = True
+            if issues:
+                return issues, jql
+
+        if not any_accepted and last_error is not None:
+            raise last_error
+        return [], ""
 
     def find_parents(self, query: str, limit: int = 20) -> tuple[list[dict[str, Any]], bool]:
         """Find candidate Epics / Change Requests by text.
