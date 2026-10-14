@@ -218,6 +218,46 @@ commands still need Jira settings, and the endpoint still reports a missing key
 rather than quietly answering from samples. Tests fail if a demo run constructs
 a Jira client or calls the AI.
 
+## QA agent (Jira + TestRail)
+
+A separate agent that reads Jira **and** TestRail, and can draft new TestRail test
+cases from a Jira story — which it creates only after you approve them.
+
+```bash
+python -m qa_agent.main
+python -m qa_agent.main "which TestRail cases cover ABC-123, and did they pass?"
+```
+
+It needs the Jira and Claude settings above plus the TestRail block in `.env.example`
+(`TESTRAIL_BASE_URL`, `TESTRAIL_EMAIL`, `TESTRAIL_API_KEY` from TestRail → My Settings →
+API Keys). Jira and TestRail are linked through the case's **References** field: a case
+with `ABC-123` in References covers that issue, and new cases are created with it set.
+
+Things to ask it:
+
+- Which test cases cover ABC-123?
+- What failed in the latest run of project 3?
+- Is every story in the current sprint covered by a test case?
+- Write test cases for ABC-123 in the "Login" section.
+
+What it can change:
+
+| | Read | Write |
+| --- | --- | --- |
+| Jira | everything the chatbot reads | nothing — same read-only client |
+| TestRail | projects, suites, sections, cases, runs, test statuses | **add new cases only** |
+
+Creating cases is gated twice. The agent prints every proposed case — title,
+preconditions, each step and its expected result — and asks `Create these in TestRail?
+[y/N]`; anything but `y` creates nothing, and with no confirmation prompt wired up every
+create is declined. Separately, `TestRailClient` refuses any POST other than `add_case`
+before it is sent, so cases cannot be edited or deleted and no runs or results can be
+added. Tests cover both.
+
+The code is in `qa_agent/`: `testrail_client.py` (API v2), `tools.py` (TestRail tools;
+the Jira tools come from `app/tools.py`), `agent.py` (`QAAgent`, which reuses the
+chatbot's tool-use loop) and `main.py` (the terminal front end).
+
 ## Configuration
 
 Every setting is an environment variable; see `.env.example` for the full list with

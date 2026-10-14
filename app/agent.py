@@ -137,6 +137,14 @@ class JiraChatAgent:
     def reset(self) -> None:
         self.messages = []
 
+    # Subclasses with other tools override these two; the loop stays the same.
+
+    def _tools(self) -> list[dict[str, Any]]:
+        return tool_definitions()
+
+    async def _execute_tool(self, name: str, args: dict[str, Any]) -> tuple[Any, bool]:
+        return await execute_tool(self.jira, name, args)
+
     def _trim_history(self) -> None:
         """Drop the oldest turns, keeping the history starting at a user turn.
 
@@ -168,7 +176,7 @@ class JiraChatAgent:
         self.messages.append({"role": "user", "content": user_message})
         self._trim_history()
 
-        tools = tool_definitions()
+        tools = self._tools()
         records: list[ToolCallRecord] = []
         response = None
 
@@ -198,7 +206,7 @@ class JiraChatAgent:
             # Parallel calls must all be executed and returned in ONE user message.
             results = await asyncio.gather(
                 *(
-                    execute_tool(self.jira, block.name, dict(block.input))
+                    self._execute_tool(block.name, dict(block.input))
                     for block in tool_uses
                 )
             )
